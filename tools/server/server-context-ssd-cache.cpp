@@ -20,14 +20,19 @@ uint64_t server_ssd_cache::store(uint32_t slot_id,
                                  size_t tokens_size,
                                  uint32_t turn_id)
 {
-    if (!cache_ || !ctx || !ckpt.data_tgt.data()) return 0;
+    if (!cache_ || !ckpt.data_tgt.data()) return 0;
 
     // Serialize full tgt state (recurrent + KV cache) for cold-start recovery.
-    const size_t tgt_size = llama_state_seq_get_size_ext(ctx, slot_id, 0);
-    std::vector<uint8_t> tgt_data(tgt_size);
-    if (llama_state_seq_get_data_ext(ctx, tgt_data.data(), tgt_size, slot_id, 0) != tgt_size) {
-        LOG_WRN("SSD cache: tgt state serialization size mismatch (slot=%u)\n", slot_id);
-        return 0;
+    std::vector<uint8_t> tgt_data;
+    if (ctx) {
+        const size_t tgt_size = llama_state_seq_get_size_ext(ctx, slot_id, 0);
+        tgt_data.resize(tgt_size);
+        if (llama_state_seq_get_data_ext(ctx, tgt_data.data(), tgt_size, slot_id, 0) != tgt_size) {
+            LOG_WRN("SSD cache: tgt state serialization size mismatch (slot=%u)\n", slot_id);
+            return 0;
+        }
+    } else {
+        tgt_data.assign(ckpt.data_tgt.data(), ckpt.data_tgt.data() + ckpt.data_tgt.size());
     }
 
     // Serialize dft state (MTP KV cache) when ctx_dft has independent memory.
@@ -66,7 +71,7 @@ bool server_ssd_cache::load(uint64_t checkpoint_id,
                             std::vector<uint8_t>* out_spec_data,
                             uint32_t dest_seq_id)
 {
-    if (!cache_ || !ctx || checkpoint_id == 0) return false;
+    if (!cache_ || checkpoint_id == 0) return false;
 
     const kv_ssd_checkpoint* meta = kv_ssd_get_meta(cache_, checkpoint_id);
     if (!meta) return false;
@@ -80,28 +85,31 @@ bool server_ssd_cache::load(uint64_t checkpoint_id,
     std::vector<uint8_t> spec_data;
     if (!kv_ssd_load(cache_, checkpoint_id, tgt_data, &dft_data, &spec_data)) return false;
 
-    // Restore tgt state (recurrent + KV cache) under the current slot's seq_id
-    if (llama_state_seq_set_data_ext(ctx, tgt_data.data(), tgt_data.size(), (int32_t)seq_id, 0) == 0) {
-        LOG_WRN("SSD cache: failed to restore tgt state for checkpoint %lu\n",
-                (unsigned long)checkpoint_id);
-        return false;
-    }
-
-    // Restore dft state (MTP KV cache) if it was saved and caller provided ctx_dft
-    if (ctx_dft && !dft_data.empty()) {
-        if (llama_state_seq_set_data_ext(ctx_dft, dft_data.data(), dft_data.size(), (int32_t)seq_id, 0) == 0) {
-            LOG_WRN("SSD cache: failed to restore dft state for checkpoint %lu - MTP will catch up\n",
+    if (ctx) {
+        // Restore tgt state (recurrent + KV cache) under the current slot's seq_id
+        if (llama_state_seq_set_data_ext(ctx, tgt_data.data(), tgt_data.size(), (int32_t)seq_id, 0) == 0) {
+            LOG_WRN("SSD cache: failed to restore tgt state for checkpoint %lu\n",
                     (unsigned long)checkpoint_id);
+            return false;
         }
-    }
 
-    if (out_spec_data) {
-        *out_spec_data = std::move(spec_data);
+        // Restore dft state (MTP KV cache) if it was saved and caller provided ctx_dft
+        if (ctx_dft && !dft_data.empty()) {
+            if (llama_state_seq_set_data_ext(ctx_dft, dft_data.data(), dft_data.size(), (int32_t)seq_id, 0) == 0) {
+                LOG_WRN("SSD cache: failed to restore dft state for checkpoint %lu\n",
+                        (unsigned long)checkpoint_id);
+                return false;
+            }
+        }
     }
 
     out_pos_min  = meta->pos_min;
     out_pos_max  = meta->pos_max;
     out_n_tokens = meta->n_tokens;
+    if (out_spec_data && !spec_data.empty()) {
+        *out_spec_data = std::move(spec_data);
+    }
+
     return true;
 }
 

@@ -293,10 +293,13 @@ struct server_slot {
     // state
     slot_state state = SLOT_STATE_IDLE;
 
+    std::string user_id_; // identity of the owning task (for scheduling/affinity)
+
     server_prompt prompt;
     uint64_t conv_hash = 0;
 
     void prompt_reset_after_memory_clear() {
+        user_id_.clear();
         prompt.clear();
         conv_hash = 0;
         n_prompt_tokens_cache = 0;
@@ -420,6 +423,7 @@ struct server_slot {
     void reset() {
         SLT_DBG(*this, "%s", "\n");
 
+        user_id_.clear();
         spec_is_replay = false;
 
         n_prompt_tokens_cache = 0;
@@ -1043,6 +1047,17 @@ public:
 
     server_state_callback_t callback_state = [](server_state, json) -> void {};
 
+    // get the number of in-flight slots for a given user_id (used for
+    // per-user concurrency cap enforcement at the HTTP layer). Returns
+    // 0 for unknown users. Anonymous bucket uses the "_anonymous" key.
+    int get_active_user_count(const std::string & user_id) const {
+        if (params_base.max_concurrent_per_user <= 0) return 0;
+        const std::string bucket = user_id.empty() ? std::string("_anonymous") : user_id;
+        std::lock_guard<std::mutex> lock(queue_tasks.mutex_tasks);
+        auto it = user_counts_.find(bucket);
+        return (it == user_counts_.end()) ? 0 : it->second;
+    }
+
     server_context_impl() {
         mtmd_helper_log_set(common_log_default_callback, nullptr);
     }
@@ -1097,6 +1112,9 @@ private:
     std::unique_ptr<llama::server_context_page_manager> ssd_page_manager;
     std::unique_ptr<kv_ssd_system_cache> sys_cache;
     uint32_t ssd_turn_counter = 1;
+
+    // Per-user concurrency tracking (user_id -> active slot count)
+    mutable std::unordered_map<std::string, int> user_counts_;
 
     server_metrics metrics;
 
@@ -1501,10 +1519,24 @@ private:
             SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
 
             slot.callback_on_release = [this](int id_slot) {
-                queue_tasks.pop_deferred_task(id_slot);
-                if (ssd_page_manager) {
-                    ssd_page_manager->on_turn_complete(ssd_turn_counter++);
+                for (auto & s : slots) {
+                    if (s.id == id_slot) {
+                        if (ssd_page_manager) {
+                            ssd_page_manager->on_turn_complete(ssd_turn_counter++);
+                        }
+                        if (!s.user_id_.empty() && params_base.max_concurrent_per_user > 0) {
+                            std::lock_guard<std::mutex> lock(queue_tasks.mutex_tasks);
+                            auto it = user_counts_.find(s.user_id_);
+                            if (it != user_counts_.end()) {
+                                if (--it->second <= 0) {
+                                    user_counts_.erase(it);
+                                }
+                            }
+                        }
+                        break;
+                    }
                 }
+                queue_tasks.pop_deferred_task(id_slot);
             };
 
             slot.reset();
@@ -1793,6 +1825,22 @@ private:
 
         bool update_cache = false;
 
+        // Per-user concurrency cap. If the requesting user_id (or the
+        // _anonymous bucket for empty user_id) is already at the cap,
+        // refuse the slot. Caller is expected to handle nullptr (defer
+        // the task).
+        if (params_base.max_concurrent_per_user > 0) {
+            const std::string bucket = task.user_id.empty() ? std::string("_anonymous") : task.user_id;
+            std::lock_guard<std::mutex> lock(queue_tasks.mutex_tasks);
+            auto it = user_counts_.find(bucket);
+            const int cur = (it == user_counts_.end()) ? 0 : it->second;
+            if (cur >= params_base.max_concurrent_per_user) {
+                SRV_INF("per-user concurrency cap hit for user_id='%s' (cur=%d, cap=%d)\n",
+                        bucket.c_str(), cur, params_base.max_concurrent_per_user);
+                return nullptr;
+            }
+        }
+
         // if a specific slot is requested, use it (still goes through cache update logic below)
         if (task.id_slot != -1) {
             ret = get_slot_by_id(task.id_slot);
@@ -1819,6 +1867,11 @@ private:
                 // skip the slot if it is not available
                 if (slot.is_processing()) {
                     SLT_TRC(slot, " - skipping, is_processing = %d\n", slot.is_processing());
+                    continue;
+                }
+
+                // skip slots owned by a different user (per-user isolation)
+                if (!slot.user_id_.empty() && !task.user_id.empty() && slot.user_id_ != task.user_id) {
                     continue;
                 }
 
@@ -1872,21 +1925,49 @@ private:
         if (ret == nullptr) {
             int64_t t_last = -1;
 
-            for (server_slot & slot : slots) {
-                // skip the slot if it is not available
-                if (slot.is_processing()) {
-                    continue;
-                }
+            // Slot affinity: prefer slots already owned by the requesting
+            // user_id (cache-locality win) before falling back to LRU.
+            // An empty slot.user_id_ is unowned and fair game.
+            const bool want_affinity = !task.user_id.empty();
+            const std::string & want_user = task.user_id;
 
-                // select the current slot if the criteria match
-                if (!ret || slot.t_last_used <= t_last) {
-                    t_last = slot.t_last_used;
-                    ret = &slot;
+            if (want_affinity) {
+                for (server_slot & slot : slots) {
+                    if (slot.is_processing()) continue;
+                    if (!slot.user_id_.empty() && slot.user_id_ != want_user) continue;
+                    if (slot.prompt.tokens.empty()) continue;
+                    if (!ret || slot.t_last_used > t_last) {
+                        t_last = slot.t_last_used;
+                        ret = &slot;
+                    }
+                }
+            }
+
+            if (ret == nullptr) {
+                t_last = -1;
+                for (server_slot & slot : slots) {
+                    // skip the slot if it is not available
+                    if (slot.is_processing()) {
+                        continue;
+                    }
+
+                    // skip slots owned by a different user (per-user isolation)
+                    if (!slot.user_id_.empty() && !task.user_id.empty() && slot.user_id_ != task.user_id) {
+                        continue;
+                    }
+
+                    // select the current slot if the criteria match
+                    if (!ret || slot.t_last_used <= t_last) {
+                        t_last = slot.t_last_used;
+                        ret = &slot;
+                    }
                 }
             }
 
             if (ret != nullptr) {
-                SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
+                SLT_INF(*ret, "selected slot by LRU%s, t_last = %" PRId64 "\n",
+                        want_affinity && ret->user_id_ == want_user ? " (user_id affinity)" : "",
+                        t_last);
 
                 update_cache = true;
             }
@@ -1916,6 +1997,14 @@ private:
                 prompt_cache->update();
 
                 SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+            }
+
+            // Per-user concurrency accounting: only count tasks that bind
+            // a real user_id (anonymous requests don't participate in the
+            // cap; they're throttled by the global n_parallel pool).
+            if (params_base.max_concurrent_per_user > 0 && !task.user_id.empty()) {
+                std::lock_guard<std::mutex> lock(queue_tasks.mutex_tasks);
+                user_counts_[task.user_id]++;
             }
         }
 
@@ -2132,6 +2221,7 @@ private:
         }
 
         slot.task = std::make_unique<const server_task>(std::move(task));
+        slot.user_id_ = slot.task->user_id; // remember owner for affinity + counter release
 
         // Compute conversation hash once from the full task tokens
         {
@@ -4820,6 +4910,10 @@ void server_context::set_state_callback(server_state_callback_t callback) {
     });
 }
 
+int server_context::get_active_user_count(const std::string & user_id) const {
+    return impl ? impl->get_active_user_count(user_id) : 0;
+}
+
 //
 // server_routes
 //
@@ -4892,6 +4986,18 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
 
+            // Operator-supplied user identity. The HTTP layer may also
+            // synthesize a tenant/user label via metadata->user_id; the
+            // raw field is the canonical form. Empty value is
+            // valid (anonymous bucket, no per-user cap).
+            try {
+                task.user_id = server_task::validate_user_id(
+                    json_value(data, "llama_user_id", std::string()));
+            } catch (const std::invalid_argument & e) {
+                throw std::invalid_argument(
+                    std::string("invalid llama_user_id: ") + e.what());
+            }
+
             // OAI-compat
             task.params.res_type          = res_type;
             task.params.oaicompat_cmpl_id = completion_id;
@@ -4908,7 +5014,28 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             tasks.push_back(std::move(task));
         }
 
+        std::string first_user_id;
+        for (const auto & t : tasks) {
+            if (!t.user_id.empty()) {
+                first_user_id = t.user_id;
+                break;
+            }
+        }
+
         rd.post_tasks(std::move(tasks));
+
+        if (params.max_concurrent_per_user > 0 && !first_user_id.empty()) {
+            const int cur = ctx_server.get_active_user_count(first_user_id);
+            if (cur >= params.max_concurrent_per_user) {
+                res->error(format_error_response(
+                    "user '" + first_user_id + "' is at the per-user concurrency cap of " +
+                    std::to_string(params.max_concurrent_per_user) +
+                    " (currently " + std::to_string(cur) + " in-flight). " +
+                    "Retry after in-flight requests complete.",
+                    ERROR_TYPE_RATE_LIMIT));
+                return res;
+            }
+        }
     } catch (const std::exception & e) {
         res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
         return res;

@@ -421,6 +421,10 @@ if (LLAMA_BUILD_SERVER)
     llama_build_and_test(test-server-prompt-checkpoint.cpp)
     target_include_directories(test-server-prompt-checkpoint PRIVATE ${PROJECT_SOURCE_DIR}/tools/server ${PROJECT_SOURCE_DIR}/tools/mtmd)
     target_link_libraries(test-server-prompt-checkpoint PRIVATE server-context)
+
+    llama_build_and_test(test-user-isolation.cpp)
+    target_include_directories(test-user-isolation PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/common ${PROJECT_SOURCE_DIR}/tools/server)
+    target_link_libraries(test-user-isolation PRIVATE server-context)
 endif()
 # Upstream model-resolution coverage serves repositories through cpp-httplib.
 llama_build_and_test(test-model-resolution.cpp)

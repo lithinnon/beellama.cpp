@@ -218,6 +218,11 @@ struct server_task {
 
     std::string user_id;
 
+    // validate a user_id against the allowed character set and length.
+    // returns the input on success, throws std::invalid_argument on failure.
+    // empty string is valid (anonymous bucket).
+    static std::string validate_user_id(std::string user_id);
+
     server_task() = default;
 
     server_task(server_task_type type) : type(type) {}

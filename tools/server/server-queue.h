@@ -22,7 +22,12 @@ private:
     std::deque<server_task> queue_tasks;
     std::deque<server_task> queue_tasks_deferred;
 
-    std::mutex mutex_tasks;
+public:
+    // mutable so const server_context_impl methods (e.g. is_user_at_cap)
+    // can lock it for read-side cap checks.
+    mutable std::mutex mutex_tasks;
+
+private:
     std::condition_variable condition_tasks;
 
     // callback functions

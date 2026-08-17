@@ -109,6 +109,9 @@ struct server_context {
 
     // note: must be set before load_model() is called
     void set_state_callback(server_state_callback_t callback);
+
+    // get the number of in-flight slots for a given user_id
+    int get_active_user_count(const std::string & user_id) const;
 };
 
 
