@@ -12102,6 +12102,9 @@ static bool ggml_vk_flash_attn_tail(
     if (k_tail == nullptr || ggml_backend_vk_kvarn_view_base(k) != nullptr) {
         return false;
     }
+    if (q->ne[1] >= 64 && ctx->device->coopmat1_fa_support) {
+        return false;
+    }
     const ggml_tensor * v_tail = dst->src[6];
     const ggml_tensor * tail_mask = dst->src[7];
     const ggml_tensor * query_order = dst->src[8];
