@@ -261,6 +261,30 @@ build host cannot detect it. Pre-Turing support remains runtime-unqualified
 until matching real devices pass the KVarN parity, memory, and model-smoke
 tests.
 
+## SSD-backed tiered KV and MoE cache
+
+| Argument | Env var | Default | Behavior |
+|---|---|---|---|
+| `--cache-ssd-path PATH` | `LLAMA_CACHE_SSD_PATH` | `""` | Base filesystem directory for SSD-backed KV caching and MoE expert paging (empty = disabled). |
+| `--cache-ssd-hot-window-tokens N` | `LLAMA_CACHE_SSD_HOT_WINDOW_TOKENS` | `16384` | Context window size (in tokens) retained permanently in VRAM. |
+| `--cache-ssd-warm-window-tokens N` | `LLAMA_CACHE_SSD_WARM_WINDOW_TOKENS` | `32768` | Context window size (in tokens) buffered in Host RAM before eviction to SSD. |
+| `--cache-ssd-page-size-tokens N` | `LLAMA_CACHE_SSD_PAGE_SIZE_TOKENS` | `1024` | Granularity of serialized disk pages in tokens (`512`, `1024`, or `2048`). |
+| `--cache-ssd-max-checkpoints N` | `LLAMA_CACHE_SSD_MAX_CHECKPOINTS` | `64` | Maximum saved turn checkpoints per slot on SSD before LRU reclamation. |
+
+## Multi-tenant user isolation and concurrency
+
+| Argument | Env var | Default | Behavior |
+|---|---|---|---|
+| `--max-concurrent-per-user N` | `LLAMA_MAX_CONCURRENT_PER_USER` | `0` | Maximum active server slots allowed per authenticated `user_id` before returning HTTP 429 (`0` = unlimited). |
+
+## Vulkan FlashAttention scratch buffer controls
+
+| Argument | Env var | Default | Behavior |
+|---|---|---|---|
+| — | `GGML_VK_NO_FA_SCRATCH_TRANSPOSE` | `0` | Disables fused dequantize+transpose scratch optimization during FlashAttention prefill. |
+| — | `GGML_VK_FA_SCRATCH_SAFETY_MB` | `512` | Minimum free host RAM headroom (in MB) required before allocating scratch buffers. |
+| — | `GGML_VK_FA_SCRATCH_FORCE` | `0` | Forces allocation of prefill scratch buffers even on memory-constrained systems. |
+
 ## Migration from earlier versions
 
 | Earlier spelling or surface | v0.4.0 behavior | Replacement |

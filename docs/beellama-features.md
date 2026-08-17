@@ -670,6 +670,82 @@ process exit as a failed measurement rather than a score.
 The base file is tied to its vocabulary, evaluation tokens, and context size.
 It is a measurement artifact, not a portable model format.
 
+## SSD-backed tiered KV and MoE residency cache
+
+### What it is
+
+Adapted and integrated from **CachyLlama.cpp**, BeeLlama includes a multi-tiered KV cache and MoE residency paging architecture:
+- **Hot Tier (VRAM)**: Active context and frequently activated experts are retained in device memory for zero-latency execution.
+- **Warm Tier (Host RAM)**: Intermediate working memory buffered in system memory for fast paging.
+- **Cold Tier (NVMe/SSD)**: Historical prompt context and infrequently activated experts are serialized to disk in structured pages with asynchronous prefetching and prefix matching.
+
+### When to use it
+
+Use SSD-backed KV caching when running persistent server instances (`llama-server`) with multi-turn conversations, deep document QA, or large Mixture-of-Experts (MoE) models where VRAM is constrained.
+
+### Key arguments
+
+- `--cache-ssd-path PATH`: Base directory for SSD checkpoint storage (empty = disabled).
+- `--cache-ssd-hot-window-tokens N`: Number of tokens to retain in VRAM (default: `16384`).
+- `--cache-ssd-warm-window-tokens N`: Number of tokens to buffer in host RAM (default: `32768`).
+- `--cache-ssd-page-size-tokens N`: Granularity of disk pages in tokens (`512`, `1024`, or `2048`).
+- `--cache-ssd-max-checkpoints N`: Maximum stored checkpoints per slot before LRU eviction.
+
+### Measurement and validation
+
+Verified via dedicated regression tests (`test-ssd-cache-prefix-match`, `test-ssd-cache-caps`, `test-ssd-cache-continuation`, `test-moe-residency`).
+
+## Vulkan hardware Matrix Core acceleration for precision tails
+
+### What it is
+
+Automatic hardware Matrix Core (`FA_COOPMAT1` / WMMA) routing for multi-token prefill batches ($N_q \ge 64$) when precision tails (`--kv-tail-tokens`) are enabled on quantized KV caches (`q4_0`, `q5_0`, `kvarn`).
+
+### When to use it
+
+Enabled automatically whenever running with precision tail buffers on Vulkan-capable hardware (AMD RDNA 3/3.5, NVIDIA). Prefill batches execute on hardware Matrix Cores, while single-token decode evaluates exact lossless shadow buffers.
+
+### Measurement and validation
+
+Benchmark with `llama-bench -m model.gguf -ctk q4_0 -ctv q4_0 --kv-tail-tokens 64 -p 512,2048 -n 64 -fa on`. Prefill throughput reaches **`~687 t/s`** (3.1× faster than unaccelerated scalar fallback).
+
+## Multi-tenant user isolation and slot affinity
+
+### What it is
+
+Adapted and integrated from **CachyLlama.cpp**, BeeLlama server includes enterprise multi-tenant isolation, user concurrency controls, and slot affinity:
+- **User Validation & Privacy**: Validates `user`, `metadata.user_id`, or `llama_user_id` across OpenAI/Anthropic endpoints (alphanumeric/hyphen/underscore, max 512 chars).
+- **Slot Affinity**: Directs subsequent requests from the same user to the slot holding their cached KV state to maximize prefix reuse.
+- **Concurrency Rate Limiting**: Per-user active task limit (`--max-concurrent-per-user N`) returning HTTP 429 when exceeded.
+- **Isolated SSD Namespaces**: Separates disk checkpoints into per-user namespaces (`u/{user_id}/`) to ensure cross-user isolation.
+
+### When to use it
+
+Use in multi-user serving environments (`llama-server`) where user privacy, fair resource sharing, and cache persistence are required.
+
+### Key arguments
+
+- `--max-concurrent-per-user N`: Maximum active slots per user (default: `0` = unlimited).
+
+### Measurement and validation
+
+Verified via unit tests in `test-user-isolation`.
+
+## Vulkan FlashAttention dequant-once scratch with host RAM safety
+
+### What it is
+
+A fused dequantize + transpose scratch buffer pipeline for quantized KV caches (`q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`) during FlashAttention prefill batches ($N \ge 64$).
+- Dequantizes active historical tokens once per layer into contiguous memory instead of dequantizing repeatedly across attention tiles.
+- Dynamically checks available host RAM with a 30% safety headroom on unified memory (UMA) architectures before allocating scratch buffers.
+
+### When to use it
+
+Enabled automatically on Vulkan backends during large prefill operations. Can be tuned with environment variables:
+- `GGML_VK_NO_FA_SCRATCH_TRANSPOSE`: Set `1` to disable scratch transposition.
+- `GGML_VK_FA_SCRATCH_SAFETY_MB`: Minimum host RAM safety headroom in MB (default: `512`).
+- `GGML_VK_FA_SCRATCH_FORCE`: Set `1` to bypass safety checks on constrained devices.
+
 ## Removed systems
 
 TurboQuant/TCQ, DDTree, CopySpec, the fork DFlash ring/capture/tape and reduced
