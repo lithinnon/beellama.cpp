@@ -623,6 +623,7 @@ struct common_params {
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+    bool      cache_har_v  = false;         // enable head-shared asymmetric offset for V (q4_h / har4)
 
     // Kept unresolved until the target model's canonical cache groups are known.
     std::string kv_tail_tokens = "0";

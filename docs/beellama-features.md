@@ -691,10 +691,6 @@ Use SSD-backed KV caching when running persistent server instances (`llama-serve
 - `--cache-ssd-page-size-tokens N`: Granularity of disk pages in tokens (`512`, `1024`, or `2048`).
 - `--cache-ssd-max-checkpoints N`: Maximum stored checkpoints per slot before LRU eviction.
 
-### Measurement and validation
-
-Verified via dedicated regression tests (`test-ssd-cache-prefix-match`, `test-ssd-cache-caps`, `test-ssd-cache-continuation`, `test-moe-residency`).
-
 ## Vulkan hardware Matrix Core acceleration for precision tails
 
 ### What it is
@@ -705,16 +701,12 @@ Automatic hardware Matrix Core (`FA_COOPMAT1` / WMMA) routing for multi-token pr
 
 Enabled automatically whenever running with precision tail buffers on Vulkan-capable hardware (AMD RDNA 3/3.5, NVIDIA). Prefill batches execute on hardware Matrix Cores, while single-token decode evaluates exact lossless shadow buffers.
 
-### Measurement and validation
-
-Benchmark with `llama-bench -m model.gguf -ctk q4_0 -ctv q4_0 --kv-tail-tokens 64 -p 512,2048 -n 64 -fa on`. Prefill throughput reaches **`~687 t/s`** (3.1× faster than unaccelerated scalar fallback).
-
 ## Multi-tenant user isolation and slot affinity
 
 ### What it is
 
-Adapted and integrated from **CachyLlama.cpp**, BeeLlama server includes enterprise multi-tenant isolation, user concurrency controls, and slot affinity:
-- **User Validation & Privacy**: Validates `user`, `metadata.user_id`, or `llama_user_id` across OpenAI/Anthropic endpoints (alphanumeric/hyphen/underscore, max 512 chars).
+Adapted and integrated from **CachyLlama.cpp**, BeeLlama server includes multi-tenant isolation, user concurrency controls, and slot affinity:
+- **User Validation**: Validates `user`, `metadata.user_id`, or `llama_user_id` across OpenAI/Anthropic endpoints (alphanumeric/hyphen/underscore, max 512 chars).
 - **Slot Affinity**: Directs subsequent requests from the same user to the slot holding their cached KV state to maximize prefix reuse.
 - **Concurrency Rate Limiting**: Per-user active task limit (`--max-concurrent-per-user N`) returning HTTP 429 when exceeded.
 - **Isolated SSD Namespaces**: Separates disk checkpoints into per-user namespaces (`u/{user_id}/`) to ensure cross-user isolation.
@@ -726,10 +718,6 @@ Use in multi-user serving environments (`llama-server`) where user privacy, fair
 ### Key arguments
 
 - `--max-concurrent-per-user N`: Maximum active slots per user (default: `0` = unlimited).
-
-### Measurement and validation
-
-Verified via unit tests in `test-user-isolation`.
 
 ## Vulkan FlashAttention dequant-once scratch with host RAM safety
 
@@ -745,6 +733,24 @@ Enabled automatically on Vulkan backends during large prefill operations. Can be
 - `GGML_VK_NO_FA_SCRATCH_TRANSPOSE`: Set `1` to disable scratch transposition.
 - `GGML_VK_FA_SCRATCH_SAFETY_MB`: Minimum host RAM safety headroom in MB (default: `512`).
 - `GGML_VK_FA_SCRATCH_FORCE`: Set `1` to bypass safety checks on constrained devices.
+
+## Head-Shared Asymmetric Offset Quantization (`q4_0_har`)
+
+### What it is
+
+**`q4_0_har`** (Head-Shared Asymmetric Rotated INT4) applies a head-level mean offset to Value activations before standard `q4_0` quantization:
+- **Head-Level Mean Centering ($\mu_{\text{head}}$)**: Computes the mean offset per head ($\mu_{\text{head}} = \frac{1}{d} \sum_{i=1}^{d} V_i$) and centers $V' = V - \mu_{\text{head}}$ before quantization, reducing the positive DC bias present in non-linear activations without adding per-block zero-point storage.
+- **Output Addback**: Attention evaluates $O' = \sum P_i V_i'$, and the head mean is added back to the attention output tensor ($O = O' + \mu_{\text{head}}$).
+- **Default Tail & Sink Buffer**: Automatically defaults `--kv-tail-tokens` to 64 when selected, retaining recent tokens and initial sink slots in the high-precision shadow buffer.
+
+### When to use it
+
+Use for long-context generation when low-bit quantization error in the Value cache needs to be minimized without introducing per-block asymmetric overhead.
+
+### Key arguments
+
+- `-ctv q4_0_har` / `--cache-type-v q4_0_har`: Selects `q4_0_har` for the Value cache.
+- `--kv-tail-tokens 64`: Configures high-precision tail token length (defaults to 64 for `q4_0_har`).
 
 ## Removed systems
 

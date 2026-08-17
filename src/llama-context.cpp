@@ -576,6 +576,7 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+    cparams.har_v      = params.har_v;
 
     // initialized later
     cparams.pipeline_parallel = false;
@@ -4540,8 +4541,9 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
-        /*.sampler                     =*/ nullptr,
-        /*.n_sampler                   =*/ 0,
+        /*.har_v                       =*/ false,
+        /*.samplers                    =*/ nullptr,
+        /*.n_samplers                  =*/ 0,
         /*.ctx_other                   =*/ nullptr,
         /*.kv_tail_tokens              =*/ 0,
         /*.kv_tail_type                =*/ GGML_TYPE_COUNT,

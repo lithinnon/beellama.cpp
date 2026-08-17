@@ -3462,6 +3462,12 @@ ggml_tensor * llm_graph_context::build_attn(
         v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot);
     }
 
+    ggml_tensor * v_mean = nullptr;
+    if (cparams.har_v) {
+        v_mean = ggml_mean(ctx0, v_cur);
+        v_cur  = ggml_sub(ctx0, v_cur, v_mean);
+    }
+
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     // expand k later to enable rope fusion which directly writes into k-v cache
@@ -3649,6 +3655,11 @@ ggml_tensor * llm_graph_context::build_attn(
         cur = ggml_kvarn_wht_aux(ctx0, cur, kvarn_rot->ne[0]);
     } else if (inp->self_v_rot) {
         cur = llama_mul_mat_hadamard(ctx0, cur, inp->self_v_rot);
+    }
+
+    if (v_mean) {
+        ggml_tensor * v_mean_q = (cur->ne[1] != v_mean->ne[1]) ? ggml_repeat(ctx0, v_mean, cur) : v_mean;
+        cur = ggml_add(ctx0, cur, v_mean_q);
     }
 
     if (wo) {

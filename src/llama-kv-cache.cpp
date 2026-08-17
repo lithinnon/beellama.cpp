@@ -3041,7 +3041,9 @@ ggml_tensor * llama_kv_cache::cpy_k_with_tail(
             ctx, body, k_cur, k_idxs, shadow, tail_idxs);
     return ggml_view_4d(ctx, written,
             hparams.n_embd_head_k(il), hparams.n_head_kv(il), tail_slots, 1,
-            ggml_row_size(written->type, hparams.n_embd_head_k(il)), written->nb[1], written->nb[2], 0);
+            ggml_row_size(shadow->type, hparams.n_embd_head_k(il)),
+            ggml_row_size(shadow->type, hparams.n_embd_k_gqa(il)),
+            ggml_row_size(shadow->type, hparams.n_embd_k_gqa(il)) * tail_slots, 0);
 }
 
 ggml_tensor * llama_kv_cache::cpy_v_with_tail(
@@ -3073,7 +3075,9 @@ ggml_tensor * llama_kv_cache::cpy_v_with_tail(
             ctx, body, v_cur, v_idxs, shadow, tail_idxs);
     return ggml_view_4d(ctx, written,
             hparams.n_embd_head_v(il), hparams.n_head_kv(il), tail_slots, 1,
-            ggml_row_size(written->type, hparams.n_embd_head_v(il)), written->nb[1], written->nb[2], 0);
+            ggml_row_size(shadow->type, hparams.n_embd_head_v(il)),
+            ggml_row_size(shadow->type, hparams.n_embd_v_gqa(il)),
+            ggml_row_size(shadow->type, hparams.n_embd_v_gqa(il)) * tail_slots, 0);
 }
 
 bool llama_kv_cache::get_kv_tail_coverage(
@@ -6790,7 +6794,9 @@ static void set_input_kq_mask_tail_impl(
         for (const auto & run : selected_runs) {
             GGML_ASSERT(run.exact + run.length <= attention_stride && run.cell + run.length <= n_kv);
             std::memcpy(exact_row + run.exact, body_row + run.cell, size_t(run.length)*sizeof(T));
-            std::fill_n(body_row + run.cell, run.length, drop);
+            if (ubatch->n_tokens == 1) {
+                std::fill_n(body_row + run.cell, run.length, drop);
+            }
         }
         if (read_data || body_read_data || bias_read_data) {
             for (uint32_t index : selected) {

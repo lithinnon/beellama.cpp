@@ -285,6 +285,13 @@ tests.
 | — | `GGML_VK_FA_SCRATCH_SAFETY_MB` | `512` | Minimum free host RAM headroom (in MB) required before allocating scratch buffers. |
 | — | `GGML_VK_FA_SCRATCH_FORCE` | `0` | Forces allocation of prefill scratch buffers even on memory-constrained systems. |
 
+## Head-Shared Asymmetric Offset Quantization (`q4_0_har`)
+
+| Argument | Env var | Default | Behavior |
+|---|---|---|---|
+| `-ctv q4_0_har` / `--cache-type-v q4_0_har` | `LLAMA_CACHE_TYPE_V` | `f16` | Enables head-shared asymmetric offset centering ($\mu_{\text{head}}$) for the Value cache. |
+| `--kv-tail-tokens 64` | `LLAMA_KV_TAIL_TOKENS` | `0` | Preserves recent tokens in the high-precision shadow buffer (automatically defaults to 64 when `q4_0_har` is active). |
+
 ## Migration from earlier versions
 
 | Earlier spelling or surface | v0.4.0 behavior | Replacement |

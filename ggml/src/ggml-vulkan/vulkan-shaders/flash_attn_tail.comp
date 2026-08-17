@@ -2,6 +2,8 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
@@ -232,26 +234,28 @@ float load_mask_half(const uint data_word, uint half_index) {
 }
 
 void accumulate_score(float partial, inout float acc[4], float values[4], float mask_value) {
-    const uint lane = gl_LocalInvocationID.x;
-    reduce_data[lane] = partial;
-    barrier();
-    for (uint stride = 64u; stride > 0u; stride >>= 1u) {
-        if (lane < stride) reduce_data[lane] += reduce_data[lane + stride];
-        barrier();
+    partial = subgroupAdd(partial);
+    if (gl_SubgroupInvocationID == 0u) {
+        reduce_data[gl_SubgroupID] = partial;
     }
-    if (lane == 0u) {
-        float score = reduce_data[0] * p.scale;
-        if (p.logit_softcap != 0.0) score = p.logit_softcap * tanh(score);
-        score += mask_value;
-        if (isinf(mask_value) && mask_value < 0.0) {
-            old_scale = 1.0;
-            weight = 0.0;
-        } else {
-            const float next_max = max(maximum, score);
-            old_scale = maximum < -3.0e38 ? 0.0 : exp(maximum - next_max);
-            weight = exp(score - next_max);
-            maximum = next_max;
-            denominator = denominator * old_scale + weight;
+    barrier();
+    if (gl_SubgroupID == 0u) {
+        float total = gl_SubgroupInvocationID < gl_NumSubgroups ? reduce_data[gl_SubgroupInvocationID] : 0.0;
+        total = subgroupAdd(total);
+        if (gl_SubgroupInvocationID == 0u) {
+            float score = total * p.scale;
+            if (p.logit_softcap != 0.0) score = p.logit_softcap * tanh(score);
+            score += mask_value;
+            if (isinf(mask_value) && mask_value < 0.0) {
+                old_scale = 1.0;
+                weight = 0.0;
+            } else {
+                const float next_max = max(maximum, score);
+                old_scale = maximum < -3.0e38 ? 0.0 : exp(maximum - next_max);
+                weight = exp(score - next_max);
+                maximum = next_max;
+                denominator = denominator * old_scale + weight;
+            }
         }
     }
     barrier();

@@ -634,6 +634,10 @@ static bench_cache_type bench_cache_type_from_name(const std::string & s) {
         return { kvarn_fallback_cache_type(kvarn_bits), kvarn_bits };
     }
 
+    if (s == "q4_0_har") {
+        return { GGML_TYPE_Q4_0, 0 };
+    }
+
     return { ggml_type_from_name(s), 0 };
 }
 

@@ -383,7 +383,7 @@ static std::string get_all_kv_cache_types(bool include_kvarn_pseudo_types = fals
         msg << kv_cache_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
     }
     if (include_kvarn_pseudo_types) {
-        msg << ", kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8";
+        msg << ", q4_0_har, kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8";
     }
     return msg.str();
 }
@@ -422,6 +422,21 @@ static void parse_target_cache_type(common_params & params, bool key, const std:
         } else {
             params.cache_kvarn_bits_v = kvarn_bits;
             params.cache_type_v = kvarn_fallback_cache_type(kvarn_bits);
+        }
+        return;
+    }
+
+    if (cache_type == "q4_0_har") {
+        if (key) {
+            params.cache_kvarn_bits_k = 0;
+            params.cache_type_k = GGML_TYPE_Q4_0;
+        } else {
+            params.cache_kvarn_bits_v = 0;
+            params.cache_type_v = GGML_TYPE_Q4_0;
+            params.cache_har_v  = true;
+            if (params.kv_tail_tokens == "0") {
+                params.kv_tail_tokens = "64";
+            }
         }
         return;
     }

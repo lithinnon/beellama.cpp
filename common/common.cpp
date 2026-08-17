@@ -1860,6 +1860,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
+    cparams.har_v  = params.cache_har_v;
     cparams.kvarn  = params.kvarn;
     cparams.kv_tail_tokens = params.kv_tail_tokens.find_first_of(",=") == std::string::npos &&
             params.kv_tail_tokens != "auto" ? std::stoul(params.kv_tail_tokens) : 0;
