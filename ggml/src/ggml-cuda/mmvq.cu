@@ -237,6 +237,14 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna3(ggml_type
     }
 }
 
+static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna3_5(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_IQ4_XS: return MMVQ_MAX_BATCH_SIZE;
+        case GGML_TYPE_Q5_K:   return MMVQ_MAX_BATCH_SIZE;
+        default:               return get_mmvq_mmid_max_batch_rdna3(type);
+    }
+}
+
 static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type type) {
     switch (type) {
         case GGML_TYPE_IQ1_S:   return 7;
@@ -286,6 +294,9 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
     if (GGML_CUDA_CC_IS_AMD(cc)) {
         if (GGML_CUDA_CC_IS_RDNA4(cc)) {
             return get_mmvq_mmid_max_batch_rdna4(type);
+        }
+        if (GGML_CUDA_CC_IS_RDNA3_5(cc)) {
+            return get_mmvq_mmid_max_batch_rdna3_5(type);
         }
         if (GGML_CUDA_CC_IS_RDNA3(cc)) {
             return get_mmvq_mmid_max_batch_rdna3(type);
@@ -358,6 +369,8 @@ template <ggml_type type>
 static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
 #if defined(RDNA4)
     return get_mmvq_mmid_max_batch_rdna4(type);
+#elif defined(RDNA3_5)
+    return get_mmvq_mmid_max_batch_rdna3_5(type);
 #elif defined(RDNA3)
     return get_mmvq_mmid_max_batch_rdna3(type);
 #elif defined(RDNA2) || defined(RDNA1)
