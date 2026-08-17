@@ -8,6 +8,8 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-context-page-manager.h"
+#include "kv-ssd-system-cache.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -292,9 +294,11 @@ struct server_slot {
     slot_state state = SLOT_STATE_IDLE;
 
     server_prompt prompt;
+    uint64_t conv_hash = 0;
 
     void prompt_reset_after_memory_clear() {
         prompt.clear();
+        conv_hash = 0;
         n_prompt_tokens_cache = 0;
         n_prompt_tokens_processed = 0;
         n_prompt_tokens_lcp = 0;
@@ -1090,6 +1094,9 @@ private:
     int n_empty_consecutive = 0;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
+    std::unique_ptr<llama::server_context_page_manager> ssd_page_manager;
+    std::unique_ptr<kv_ssd_system_cache> sys_cache;
+    uint32_t ssd_turn_counter = 1;
 
     server_metrics metrics;
 
@@ -1108,6 +1115,8 @@ private:
 
     void destroy() {
         prompt_cache.reset();
+        ssd_page_manager.reset();
+        sys_cache.reset();
         spec.reset();
         spec_init.reset();
 
@@ -1493,6 +1502,9 @@ private:
 
             slot.callback_on_release = [this](int id_slot) {
                 queue_tasks.pop_deferred_task(id_slot);
+                if (ssd_page_manager) {
+                    ssd_page_manager->on_turn_complete(ssd_turn_counter++);
+                }
             };
 
             slot.reset();
@@ -1543,6 +1555,73 @@ private:
                     params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
         } else {
             SRV_TRC("%s", "context checkpoints disabled\n");
+        }
+
+        // Initialize SSD-backed KV cache
+        if (!params_base.cache_ssd_path.empty()) {
+            llama::kv_eviction_config cfg;
+            cfg.max_hot_bytes = (size_t)params_base.cache_ssd_hot_ram_mib * 1024 * 1024;
+            cfg.max_warm_bytes = (size_t)params_base.cache_ssd_warm_ram_mib * 1024 * 1024;
+            cfg.auto_size = (params_base.cache_ssd_hot_ram_mib == 0 &&
+                             params_base.cache_ssd_warm_ram_mib == 0);
+            cfg.hot_window_tokens = params_base.cache_ssd_hot_window_tokens;
+            cfg.warm_window_tokens = params_base.cache_ssd_warm_window_tokens;
+            cfg.page_size_tokens = params_base.cache_ssd_page_size_tokens;
+            cfg.max_cold_checkpoints = params_base.cache_ssd_max_cold;
+            cfg.turn_inactivity_threshold = 2;
+
+            ssd_page_manager = std::make_unique<llama::server_context_page_manager>(
+                params_base.cache_ssd_path.c_str(), &cfg,
+                (size_t)n_ctx, params_base.cache_ssd_max_checkpoints);
+            ssd_page_manager->max_conversations = params_base.cache_ssd_max_conversations;
+            ssd_page_manager->cold_max_size_bytes =
+                params_base.cache_ssd_cold_max_size_mib > 0
+                    ? (size_t)params_base.cache_ssd_cold_max_size_mib * 1024 * 1024
+                    : 0;
+            ssd_page_manager->set_no_fsync(params_base.cache_ssd_no_fsync);
+
+            // Set model info
+            ssd_page_manager->set_model_info(model_tgt,
+                params_base.cache_type_k, params_base.cache_type_v);
+
+            // Seed turn counter from disk
+            ssd_turn_counter = ssd_page_manager->get_max_turn_id() + 1;
+
+            SRV_INF("SSD cache enabled: path=%s, hot=%d MiB, warm=%d MiB\n",
+                    params_base.cache_ssd_path.c_str(),
+                    params_base.cache_ssd_hot_ram_mib,
+                    params_base.cache_ssd_warm_ram_mib);
+        }
+
+        // Initialize global system prompt cache (cross-conversation reuse)
+        if (params_base.cache_ssd_system_prompts > 0 && !params_base.cache_ssd_path.empty()) {
+            char desc_buf[2048];
+            int desc_len = llama_model_desc(model_tgt, desc_buf, sizeof(desc_buf));
+            uint64_t compat_h = (desc_len > 0) ? 14695981039346656037ULL : 0;
+            if (desc_len > 0) {
+                for (int i = 0; i < desc_len; i++) {
+                    compat_h ^= (uint64_t)(unsigned char)desc_buf[i];
+                    compat_h *= 1099511628211ULL;
+                }
+                uint32_t tk = (uint32_t)params_base.cache_type_k;
+                compat_h ^= (uint64_t)(tk & 0xFF);         compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tk >> 8) & 0xFF);  compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tk >> 16) & 0xFF); compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tk >> 24) & 0xFF); compat_h *= 1099511628211ULL;
+                uint32_t tv = (uint32_t)params_base.cache_type_v;
+                compat_h ^= (uint64_t)(tv & 0xFF);         compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tv >> 8) & 0xFF);  compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tv >> 16) & 0xFF); compat_h *= 1099511628211ULL;
+                compat_h ^= (uint64_t)((tv >> 24) & 0xFF); compat_h *= 1099511628211ULL;
+            }
+
+            sys_cache = std::make_unique<kv_ssd_system_cache>();
+            sys_cache->max_entries = (size_t)params_base.cache_ssd_system_prompts;
+            sys_cache->max_unused_days = params_base.cache_ssd_system_max_days;
+            if (sys_cache->init(params_base.cache_ssd_path, compat_h)) {
+                SRV_INF("System prompt cache enabled: max_entries=%zu, max_days=%d\n",
+                        sys_cache->max_entries, sys_cache->max_unused_days);
+            }
         }
 
         if (!params_base.model_alias.empty()) {
@@ -1840,6 +1919,42 @@ private:
             }
         }
 
+        if (ret && ret->prompt.tokens.empty() && ssd_page_manager && task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt) {
+            const auto & task_tokens = task.tokens.get_tokens();
+            if (!task_tokens.empty()) {
+                int32_t ssd_pos_min = 0, ssd_pos_max = 0;
+                uint64_t ssd_n_tokens = 0;
+                int32_t ssd_lcp = 0;
+                float ssd_overlap = 0.0f;
+                bool ssd_is_continuation = false;
+                std::vector<uint8_t> ssd_spec_data;
+                const uint64_t conv_hash = kv_ssd_hash_tokens(
+                    (const uint32_t *)task_tokens.data(),
+                    std::min(task_tokens.size(), (size_t)1024));
+
+                if (ssd_page_manager->find_and_load_checkpoint(
+                        task_tokens.data(), task_tokens.size(),
+                        ssd_turn_counter, ctx_tgt, ctx_dft,
+                        (uint32_t)ret->id,
+                        ssd_pos_min, ssd_pos_max, ssd_n_tokens,
+                        &ssd_spec_data,
+                        conv_hash, 0, (uint64_t)task_tokens.size(),
+                        &ssd_lcp, &ssd_overlap, &ssd_is_continuation,
+                        task.user_id)) {
+                    if (ssd_n_tokens <= task_tokens.size()) {
+                        ret->prompt.tokens.clear();
+                        for (size_t i = 0; i < (size_t)ssd_n_tokens; ++i) {
+                            ret->prompt.tokens.push_back(task_tokens[i]);
+                        }
+                        ret->prompt_cache_source = "ssd";
+                        ret->prompt_cache_reason = "ssd_restore_committed";
+                        SLT_INF(*ret, "restored prompt from SSD cache: n_tokens=%lu\n",
+                                (unsigned long)ssd_n_tokens);
+                    }
+                }
+            }
+        }
+
         return ret;
     }
 
@@ -2017,6 +2132,14 @@ private:
         }
 
         slot.task = std::make_unique<const server_task>(std::move(task));
+
+        // Compute conversation hash once from the full task tokens
+        {
+            const auto & task_tokens = slot.task->tokens.get_tokens();
+            size_t hash_len = std::min(task_tokens.size(), (size_t)1024);
+            slot.conv_hash = kv_ssd_hash_tokens(
+                (const uint32_t *)task_tokens.data(), hash_len);
+        }
 
         slot.state = slot.task->is_child()
             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
@@ -2728,6 +2851,16 @@ private:
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                 (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, admitted.pos_min,
                 admitted.pos_max, admitted.n_tokens, (float) admitted.size() / 1024 / 1024);
+
+        if (ssd_page_manager) {
+            const auto & prefix_tokens = slot.prompt.tokens;
+            ssd_page_manager->store_checkpoint_with_tokens(
+                slot.id, ctx_tgt, ctx_dft, admitted,
+                prefix_tokens.get_tokens().data(),
+                prefix_tokens.get_tokens().size(),
+                ssd_turn_counter, slot.conv_hash,
+                slot.task ? slot.task->user_id : std::string());
+        }
     }
 
     bool restore_checkpoint_transaction(

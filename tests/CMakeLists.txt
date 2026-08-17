@@ -405,6 +405,9 @@ llama_build_and_test(test-cuda-fattn-vec-policy.cpp ARGS ${PROJECT_SOURCE_DIR})
 llama_build_and_test(test-cuda-zero-dim-gemm.cpp ARGS ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda/ggml-cuda.cu)
 llama_build_and_test(test-cpu-out-prod.cpp)
 llama_build_and_test(test-cpu-fattn-support.cpp)
+llama_build_and_test(test-ssd-cache-prefix-match.cpp)
+llama_build_and_test(test-ssd-cache-caps.cpp)
+llama_build_and_test(test-ssd-cache-continuation.cpp)
 
 # The tests subdirectory is configured before tools/server, so server-context
 # is not a CMake target yet at this point.  Match test-chat above and gate on

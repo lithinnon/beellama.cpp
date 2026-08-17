@@ -85,6 +85,14 @@ add_library(${TARGET}
     imatrix-loader.h
     json-schema-to-grammar.cpp
     llguidance.cpp
+    host-ram.cpp
+    host-ram.h
+    kv-ssd-cache.cpp
+    kv-ssd-cache.h
+    kv-ssd-system-cache.cpp
+    kv-ssd-system-cache.h
+    kv_page_manager.cpp
+    kv_page_manager.h
     log.cpp
     log.h
     ngram-cache.cpp

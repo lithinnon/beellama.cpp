@@ -19,6 +19,10 @@ add_library(${TARGET} STATIC
     server-loop-guard.h
     server-stream.cpp
     server-stream.h
+    server-context-page-manager.cpp
+    server-context-page-manager.h
+    server-context-ssd-cache.cpp
+    server-context-ssd-cache.h
     server-tools.cpp
     server-tools.h
     server-mcp.cpp

@@ -216,6 +216,8 @@ struct server_task {
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
 
+    std::string user_id;
+
     server_task() = default;
 
     server_task(server_task_type type) : type(type) {}
