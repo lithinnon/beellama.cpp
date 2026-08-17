@@ -830,11 +830,33 @@ llama_context::llama_context(
             sampling.token_ids_full_vocab[i] = i;
         }
     }
+
+    // Initialize MoE expert tracking (disabled by default)
+    {
+        const int64_t n_layer = hparams.n_layer();
+        const int64_t n_expert = hparams.n_expert;
+        expert_stats.resize(n_layer);
+        for (int64_t il = 0; il < n_layer; ++il) {
+            expert_stats[il].activation_count.resize(n_expert, 0);
+        }
+    }
 }
 
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+
+    // Save co-activation matrix to disk before releasing residency state.
+    if (moe_coact_enabled && !moe_coact_path.empty()) {
+        llama_moe_coact::save(moe_coact, moe_coact_path);
+    }
+
+    // Release MoE residency state first (calls MADV_DONTNEED on all hot
+    // expert pages before the mmap is torn down).
+    if (moe_residency.cfg.enabled) {
+        llama_moe_residency_release(&moe_residency);
+        moe_residency.cfg.enabled = false;
+    }
 
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
@@ -1070,6 +1092,56 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_INFO("%s: reserve took %.2f ms, sched copies = %d\n",
             __func__, (t_end_us - t_start_us)/1000.0, ggml_backend_sched_get_n_copies(sched.get()));
+
+    // Build MoE expert residency state if enabled. This walks the model
+    // layers, identifies MoE expert tensors, and captures per-expert strides
+    // for madvise-based residency management.
+    if (moe_residency.cfg.enabled && moe_residency.layers.empty()) {
+        if (llama_moe_residency_build(&model, moe_residency.cfg, &moe_residency)) {
+            LLAMA_LOG_WARN("moe-residency: enabled for %d MoE layers (%d experts, %d used/token)\n",
+                    (int) moe_residency.layers.size(),
+                    moe_residency.n_expert,
+                    moe_residency.n_expert_used);
+
+            // Initialize co-activation matrix and try to load persisted data.
+            llama_moe_coact::init(moe_coact, model);
+            if (!model_path.empty()) {
+                moe_coact_path = llama_moe_coact::persistence_path(model_path);
+                if (llama_moe_coact::load(moe_coact, moe_coact_path)) {
+                    LLAMA_LOG_WARN("moe-coact: loaded %d layers x %d experts from %s\n",
+                            moe_coact.num_layers, moe_coact.num_experts,
+                            moe_coact_path.c_str());
+                } else {
+                    LLAMA_LOG_WARN("moe-coact: no persisted data at %s, starting fresh\n",
+                            moe_coact_path.c_str());
+                }
+            }
+            moe_coact_enabled = true;
+
+            if (moe_residency.cfg.prewarm_on_init) {
+                std::vector<std::vector<int>> top;
+                llama_moe_residency_topk_from_stats(this, moe_residency.cfg.prewarm_top_k, top);
+                std::vector<std::vector<int>> layer_top(moe_residency.n_layers);
+                if (top.empty()) {
+                    for (int il = 0; il < moe_residency.n_layers; ++il) {
+                        layer_top[il].clear();
+                    }
+                } else {
+                    for (int il = 0; il < moe_residency.n_layers && il < (int) top.size(); ++il) {
+                        layer_top[il] = std::move(top[il]);
+                    }
+                }
+                std::vector<const int *> ptrs(moe_residency.n_layers);
+                for (int il = 0; il < moe_residency.n_layers; ++il) {
+                    ptrs[il] = layer_top[il].empty() ? nullptr : layer_top[il].data();
+                }
+                llama_moe_residency_prewarm(&moe_residency, ptrs.empty() ? nullptr : ptrs.data());
+            }
+        } else {
+            LLAMA_LOG_WARN("moe-residency: model is not MoE or build failed, disabling\n");
+            moe_residency.cfg.enabled = false;
+        }
+    }
 }
 
 void llama_context::record_backend_private_workspace(ggml_cgraph * gf) {
@@ -1114,6 +1186,165 @@ void llama_context::record_backend_private_workspace(ggml_cgraph * gf) {
                         size / 1024.0 / 1024.0);
             }
         }
+    }
+}
+
+static void compute_topk_from_probs(
+        const float * probs,
+        int64_t n_expert,
+        int64_t n_tokens,
+        int n_used,
+        std::vector<int32_t> & out) {
+    out.resize(n_tokens * n_used);
+    std::vector<std::pair<float, int32_t>> scored;
+    scored.resize(n_expert);
+    for (int64_t t = 0; t < n_tokens; ++t) {
+        const float * p = probs + t * n_expert;
+        for (int64_t e = 0; e < n_expert; ++e) {
+            scored[e] = { p[e], (int32_t) e };
+        }
+        std::partial_sort(scored.begin(), scored.begin() + n_used, scored.end(),
+            [](const auto & a, const auto & b) { return a.first > b.first; });
+        for (int e = 0; e < n_used; ++e) {
+            out[t * n_used + e] = scored[e].second;
+        }
+    }
+}
+
+void llama_context::track_expert_activations(ggml_cgraph * gf, uint32_t n_tokens) {
+    GGML_UNUSED(n_tokens);
+    if (!expert_tracking_enabled || !gf) {
+        return;
+    }
+
+    const int64_t n_layer = model.hparams.n_layer();
+    const int64_t n_expert = model.hparams.n_expert;
+    const int64_t n_expert_used = model.hparams.n_expert_used;
+
+    if (n_expert <= 0 || n_expert_used <= 0) {
+        return;
+    }
+
+    // Ensure stats array matches model layer count
+    if (expert_stats.size() != (size_t)n_layer) {
+        expert_stats.resize(n_layer);
+        for (auto & stats : expert_stats) {
+            stats.activation_count.resize(n_expert, 0);
+        }
+    }
+
+    // Synchronize to ensure graph execution is complete and tensor data is ready
+    synchronize();
+
+    const int n_nodes = ggml_graph_n_nodes(gf);
+    std::vector<uint8_t> layer_valid(n_layer, 0);
+
+    for (int i = 0; i < n_nodes; i++) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (!node) continue;
+
+        const char * name = ggml_get_name(node);
+        if (!name || name[0] == '\0') continue;
+
+        // Routing tensor name pattern: ffn_moe_topk-%d (I32 top-k view) or
+        // ffn_moe_argsort-%d (I32 full sort)
+        const bool is_topk = (strstr(name, "ffn_moe_topk") != nullptr);
+        const bool is_argsort = (strstr(name, "ffn_moe_argsort") != nullptr);
+        if (!is_topk && !is_argsort) continue;
+        if (node->type != GGML_TYPE_I32) continue;
+
+        int il = -1;
+        if (is_topk) {
+            if (sscanf(name, "ffn_moe_topk-%d", &il) != 1) continue;
+        } else {
+            if (sscanf(name, "ffn_moe_argsort-%d", &il) != 1) continue;
+        }
+
+        if (il < 0 || il >= n_layer) continue;
+
+        const int64_t n_tok = node->ne[1];
+        const int64_t stride = node->ne[0];
+        if (n_tok <= 0 || stride <= 0 || ggml_nelements(node) == 0) continue;
+
+        const size_t data_size = ggml_nelements(node) * sizeof(int32_t);
+        std::vector<int32_t> expert_indices(data_size / sizeof(int32_t));
+        ggml_backend_tensor_get(node, expert_indices.data(), 0, data_size);
+
+        const int64_t n_check = std::min<int64_t>(stride, n_expert_used);
+        bool looks_valid = false;
+        for (int64_t k = 0; k < n_check && k < 4; ++k) {
+            const int32_t eid = expert_indices[k];
+            if (eid >= 0 && eid < (int32_t) n_expert) {
+                looks_valid = true;
+                break;
+            }
+        }
+        if (!looks_valid) continue;
+
+        auto & stats = expert_stats[il];
+        stats.total_tokens += n_tok;
+
+        stats.last_selected.assign((size_t) n_tok * (size_t) n_expert_used, -1);
+        stats.n_tokens_last = (int32_t) n_tok;
+        for (int64_t t = 0; t < n_tok; t++) {
+            for (int64_t e = 0; e < n_check; e++) {
+                int32_t expert_id = expert_indices[t * stride + e];
+                if (expert_id >= 0 && expert_id < (int32_t)n_expert) {
+                    stats.activation_count[expert_id]++;
+                    stats.last_selected[t * n_expert_used + e] = expert_id;
+                }
+            }
+        }
+        layer_valid[(size_t) il] = 1;
+    }
+
+    // Fallback pass: compute top-K from F32 ffn_moe_probs if I32 wasn't populated
+    for (int i = 0; i < n_nodes; i++) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (!node) continue;
+        const char * name = ggml_get_name(node);
+        if (!name || name[0] == '\0') continue;
+        if (strstr(name, "ffn_moe_probs") == nullptr) continue;
+        if (node->type != GGML_TYPE_F32) continue;
+
+        int il = -1;
+        if (sscanf(name, "ffn_moe_probs-%d", &il) != 1) continue;
+        if (il < 0 || il >= n_layer) continue;
+        if (layer_valid[(size_t) il]) continue;
+
+        const int64_t n_tok = node->ne[1];
+        const int64_t n_exp = node->ne[0];
+        if (n_exp != n_expert) continue;
+        if (n_tok <= 0 || n_exp <= 0 || ggml_nelements(node) == 0) continue;
+
+        const size_t data_size = ggml_nelements(node) * sizeof(float);
+        std::vector<float> probs(data_size / sizeof(float));
+        ggml_backend_tensor_get(node, probs.data(), 0, data_size);
+
+        bool looks_like_probs = true;
+        for (int k = 0; k < std::min<int>((int) probs.size(), 8); ++k) {
+            const float v = probs[k];
+            if (v < -0.01f || v > 1.01f) {
+                looks_like_probs = false;
+                break;
+            }
+        }
+        if (!looks_like_probs) continue;
+
+        std::vector<int32_t> topk;
+        compute_topk_from_probs(probs.data(), n_exp, n_tok, (int) n_expert_used, topk);
+
+        auto & stats = expert_stats[il];
+        stats.total_tokens += n_tok;
+        stats.last_selected = std::move(topk);
+        stats.n_tokens_last = (int32_t) n_tok;
+        for (int64_t e = 0; e < (int64_t) stats.last_selected.size(); ++e) {
+            int32_t eid = stats.last_selected[(size_t) e];
+            if (eid >= 0 && eid < (int32_t) n_expert) {
+                stats.activation_count[eid]++;
+            }
+        }
+        layer_valid[(size_t) il] = 1;
     }
 }
 
@@ -2349,6 +2580,69 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
+
+        // Track MoE expert activations
+        if (expert_tracking_enabled) {
+            track_expert_activations(res->get_gf(), ubatch.n_tokens);
+        }
+
+        // Update MoE residency LRU with the experts that just fired.
+        // Touches the per-layer last_selected snapshot for each MoE layer.
+        if (moe_residency.cfg.enabled && expert_tracking_enabled) {
+            const int n_layer_model = (int) expert_stats.size();
+            for (int il = 0; il < n_layer_model; ++il) {
+                const auto & stats = expert_stats[il];
+                if (stats.last_selected.empty()) continue;
+                // Deduplicate: a single expert may appear multiple times in
+                // the selection (one per token). touch() is idempotent.
+                llama_moe_residency_touch_layer_selection(
+                    &moe_residency,
+                    il,
+                    stats.last_selected.data(),
+                    (int) stats.last_selected.size());
+            }
+            moe_residency.decode_count++;
+            if (moe_residency.cfg.log_per_decode &&
+                (moe_residency.decode_count % 16) == 0) {
+                llama_moe_residency_log_stats(&moe_residency);
+            }
+        }
+
+        // Record per-layer selections into the co-activation matrix for
+        // future predictions. Only the first token (t=0) is used as the
+        // anchor for cross-layer correlation to avoid N^2 blow-up.
+        if (moe_coact_enabled && expert_tracking_enabled && ubatch.n_tokens >= 1) {
+            const int n_layer_model = (int) expert_stats.size();
+            for (int il = 0; il < n_layer_model; ++il) {
+                const auto & stats = expert_stats[il];
+                if (stats.last_selected.empty()) continue;
+                // First token's selections: [0, n_expert_used) entries.
+                const int n_used = model.hparams.n_expert_used;
+                llama_moe_coact::record(
+                    moe_coact, il, stats.last_selected.data(), n_used);
+                // Cross-layer with previous decode (token 0 only).
+                if (il < (int) moe_prev_layer_selection.size() &&
+                    !moe_prev_layer_selection[il].empty()) {
+                    llama_moe_coact::record_cross_layer(
+                        moe_coact,
+                        il,
+                        moe_prev_layer_selection[il].data(),
+                        (int) moe_prev_layer_selection[il].size(),
+                        stats.last_selected.data(),
+                        n_used);
+                }
+                // Save first token's selection for next cross-layer.
+                if (moe_prev_layer_selection.size() != (size_t) n_layer_model) {
+                    moe_prev_layer_selection.resize(n_layer_model);
+                }
+                if ((int) moe_prev_layer_selection[il].size() != n_used) {
+                    moe_prev_layer_selection[il].resize(n_used);
+                }
+                for (int e = 0; e < n_used; ++e) {
+                    moe_prev_layer_selection[il][e] = stats.last_selected[e];
+                }
+            }
+        }
 
         auto * t_logits  = res->get_logits();
         auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
@@ -5034,6 +5328,155 @@ void llama_perf_context_print(const llama_context * ctx) {
 
 void llama_perf_context_reset(llama_context * ctx) {
     ctx->perf_reset();
+}
+
+//
+// MoE expert tracking
+//
+
+void llama_expert_tracking_enable(struct llama_context * ctx, bool enable) {
+    if (!ctx) return;
+    ctx->expert_tracking_enabled = enable;
+    if (!enable) {
+        ctx->reset_expert_stats();
+    }
+}
+
+bool llama_expert_tracking_enabled(const struct llama_context * ctx) {
+    if (!ctx) return false;
+    return ctx->expert_tracking_enabled;
+}
+
+int32_t llama_expert_stats_get(const struct llama_context * ctx, int32_t layer, struct llama_expert_stats * stats) {
+    if (!ctx || !stats) return -1;
+
+    const llama_model & model = ctx->get_model();
+    if (layer < 0 || (uint32_t)layer >= model.hparams.n_layer()) return -1;
+
+    const auto * layer_stats = ctx->get_expert_stats(layer);
+    if (!layer_stats) return -1;
+
+    stats->n_expert = (int32_t)layer_stats->activation_count.size();
+    stats->n_expert_used = model.hparams.n_expert_used;
+    stats->total_tokens = layer_stats->total_tokens;
+    stats->activation_count = const_cast<uint64_t*>(layer_stats->activation_count.data());
+
+    return 0;
+}
+
+void llama_expert_stats_reset(struct llama_context * ctx) {
+    if (!ctx) return;
+    ctx->reset_expert_stats();
+}
+
+int32_t llama_expert_last_selected_get(
+        const struct llama_context * ctx,
+        int32_t layer,
+        struct llama_expert_last_selection * selection) {
+    if (!ctx || !selection) return -1;
+    if (!ctx->expert_tracking_enabled) return -1;
+
+    const llama_model & model = ctx->get_model();
+    if (model.hparams.n_expert <= 0) return -1;
+    if (layer < 0 || (uint32_t) layer >= model.hparams.n_layer()) return -1;
+
+    const auto * stats = ctx->get_expert_stats(layer);
+    if (!stats) return -1;
+
+    selection->n_expert_used = model.hparams.n_expert_used;
+    selection->n_tokens      = stats->n_tokens_last;
+    selection->selected      = stats->last_selected.empty()
+                                ? nullptr
+                                : stats->last_selected.data();
+    return 0;
+}
+
+void llama_expert_last_selected_clear(struct llama_context * ctx) {
+    if (!ctx) return;
+    ctx->clear_last_selected_experts();
+}
+
+void llama_set_model_path(struct llama_context * ctx, const char * path) {
+    if (!ctx) return;
+    ctx->model_path = path ? path : "";
+}
+
+//
+// MoE expert residency
+//
+
+struct llama_moe_residency_config llama_moe_residency_config_default(void) {
+    struct llama_moe_residency_config cfg = {};
+    cfg.enabled                = 0;
+    cfg.max_resident_per_layer = 128;
+    cfg.prewarm_on_init        = 1;
+    cfg.prewarm_top_k          = 8;
+    cfg.log_per_decode         = 1;
+    return cfg;
+}
+
+int32_t llama_moe_residency_enable(
+        struct llama_context * ctx,
+        const struct llama_moe_residency_config * cfg) {
+    if (!ctx || !cfg) return -1;
+
+    llama_moe_residency_internal_cfg icfg;
+    icfg.enabled                = cfg->enabled != 0;
+    icfg.max_resident_per_layer = cfg->max_resident_per_layer;
+    icfg.prewarm_on_init        = cfg->prewarm_on_init != 0;
+    icfg.prewarm_top_k          = (int) cfg->prewarm_top_k;
+    icfg.log_per_decode         = cfg->log_per_decode != 0;
+
+    ctx->expert_tracking_enabled = true;
+    ctx->moe_residency.cfg = icfg;
+
+    if (!icfg.enabled) {
+        return 0;
+    }
+
+    if (ctx->sched_ready()) {
+        if (llama_moe_residency_build(&ctx->get_model(), icfg, &ctx->moe_residency)) {
+            LLAMA_LOG_WARN("moe-residency: enabled for %d MoE layers (%d experts, %d used/token)\n",
+                    (int) ctx->moe_residency.layers.size(),
+                    ctx->moe_residency.n_expert,
+                    ctx->moe_residency.n_expert_used);
+            if (icfg.prewarm_on_init) {
+                std::vector<std::vector<int>> top;
+                llama_moe_residency_topk_from_stats(ctx, icfg.prewarm_top_k, top);
+                std::vector<const int *> ptrs(ctx->moe_residency.n_layers, nullptr);
+                for (int il = 0; il < ctx->moe_residency.n_layers; ++il) {
+                    if (il < (int) top.size() && !top[il].empty()) {
+                        ptrs[il] = top[il].data();
+                    }
+                }
+                llama_moe_residency_prewarm(&ctx->moe_residency, ptrs.data());
+            }
+            return 0;
+        }
+        LLAMA_LOG_WARN("moe-residency: model is not MoE or build failed, disabling\n");
+        ctx->moe_residency.cfg.enabled = false;
+        return -1;
+    }
+    return 0;
+}
+
+void llama_moe_residency_disable(struct llama_context * ctx) {
+    if (!ctx) return;
+    if (ctx->moe_residency.cfg.enabled) {
+        llama_moe_residency_release(&ctx->moe_residency);
+    }
+    ctx->moe_residency.cfg.enabled = false;
+}
+
+void llama_moe_residency_stats_get(
+        const struct llama_context * ctx,
+        struct llama_moe_residency_stats * out) {
+    if (!ctx || !out) return;
+    out->total_hits       = ctx->moe_residency.total_hits;
+    out->total_misses     = ctx->moe_residency.total_misses;
+    out->total_evicted    = ctx->moe_residency.total_evicted;
+    out->decode_count     = ctx->moe_residency.decode_count;
+    out->moe_layer_count  = (uint64_t) ctx->moe_residency.layers.size();
 }
 
 //

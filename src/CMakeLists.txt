@@ -40,6 +40,8 @@ add_library(llama
             llama-model-loader.cpp
             llama-model-saver.cpp
             llama-model.cpp
+            llama-moe-coact.cpp
+            llama-moe-residency.cpp
             llama-quant.cpp
             llama-sampler.cpp
             llama-vocab.cpp

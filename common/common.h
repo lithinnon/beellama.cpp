@@ -700,6 +700,16 @@ struct common_params {
     bool cache_ssd_no_fsync = false;          // skip fsync on SSD checkpoint writes (trade durability for latency)
     int32_t max_concurrent_per_user = 0;     // 0 = unlimited. cap on in-flight slots per user_id (also applies to the anonymous bucket)
 
+    // MoE expert SSD residency (Phase 1, madvise-based).
+    // When enabled, tracks which MoE experts fire per layer and uses madvise
+    // to keep hot experts paged in while cold ones are evicted from RAM.
+    // Reduces physical memory footprint of MoE models; relies on Linux mmap.
+    bool    moe_expert_residency    = false;  // master enable
+    int32_t moe_resident_per_layer = 32;     // experts kept hot per layer
+    bool    moe_residency_prewarm   = true;   // prewarm top-K experts at startup
+    int32_t moe_residency_top_k    = 16;     // prewarm K experts
+    bool    moe_residency_log       = true;   // log hit rate every 16 decodes
+
     std::string hostname      = "127.0.0.1";
     std::string public_path   = "";                                                                         // NOLINT
     std::string api_prefix    = "";                                                                         // NOLINT

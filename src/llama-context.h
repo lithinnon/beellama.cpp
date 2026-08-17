@@ -7,6 +7,8 @@
 #include "llama-adapter.h"
 #include "llama-impl.h"
 #include "llama-memory.h"
+#include "llama-moe-residency.h"
+#include "llama-moe-coact.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -62,6 +64,7 @@ struct llama_context {
     const llama_cparams & get_cparams() const;
 
     ggml_backend_sched_t get_sched() const;
+    bool sched_ready() const { return (bool) sched; }
 
     uint32_t n_ctx()     const;
     uint32_t n_ctx_seq() const;
@@ -380,6 +383,59 @@ private:
 
     bool has_evaluated_once = false;
 
+    // MoE expert activation tracking
+    struct expert_layer_stats {
+        std::vector<uint64_t> activation_count;  // [n_expert] per-expert activation count
+        uint64_t total_tokens = 0;               // total tokens processed in this layer
+        // Most-recent per-token selected expert IDs (top n_expert_used per token),
+        // captured from ffn_moe_argsort / ffn_moe_topk / ffn_moe_probs. Layout: [n_tokens * n_expert_used] row-major.
+        std::vector<int32_t> last_selected;      // [n_tokens_last * n_expert_used]
+        int32_t n_tokens_last = 0;               // tokens captured in last_selected
+    };
+
+    std::vector<expert_layer_stats> expert_stats;  // [n_layer] per-layer stats
+
+    // Read selected_experts tensors from the compute graph and update stats.
+    void track_expert_activations(ggml_cgraph * gf, uint32_t n_tokens);
+
+public:
+    bool expert_tracking_enabled = false;
+
+    // Accessor for the public API
+    const expert_layer_stats * get_expert_stats(int32_t layer) const {
+        if (layer < 0 || layer >= (int32_t)expert_stats.size()) return nullptr;
+        return &expert_stats[layer];
+    }
+
+    void reset_expert_stats() {
+        for (auto & stats : expert_stats) {
+            std::fill(stats.activation_count.begin(), stats.activation_count.end(), 0);
+            stats.total_tokens = 0;
+            stats.last_selected.clear();
+            stats.n_tokens_last = 0;
+        }
+    }
+
+    void clear_last_selected_experts() {
+        for (auto & stats : expert_stats) {
+            stats.last_selected.clear();
+            stats.n_tokens_last = 0;
+        }
+    }
+
+    // MoE expert residency state (madvise-based). Disabled by default.
+    llama_moe_residency_state moe_residency;
+
+    // Co-activation matrix. Tracks which experts fire together.
+    llama_moe_coact::matrix moe_coact;
+    std::string moe_coact_path;     // empty = not yet initialized
+    bool moe_coact_enabled = false;
+    std::vector<std::vector<int32_t>> moe_prev_layer_selection;
+
+    // Source model path, used to derive the coact persistence file location.
+    std::string model_path;
+
+private:
     // env: LLAMA_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;
 

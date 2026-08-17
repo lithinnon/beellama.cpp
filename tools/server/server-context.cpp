@@ -1035,6 +1035,7 @@ public:
     //  - when not in sleeping state
     //  - and, with thread-safe APIs (e.g., tokenizer calls)
     llama_model * model_tgt = nullptr;
+    llama_context * get_ctx_tgt() const { return ctx_tgt; }
 
     mtmd_context * mctx = nullptr;
     const llama_vocab * vocab = nullptr;
@@ -6057,6 +6058,69 @@ void server_routes::init_routes() {
 
         GGML_ASSERT(dynamic_cast<server_task_result_apply_lora*>(result.get()) != nullptr);
         res->ok(result->to_json());
+        return res;
+    };
+
+    this->get_expert_stats = [this](const server_http_req &) {
+        auto res = create_response(true);
+        llama_context * ctx = ctx_server.get_ctx_tgt();
+        if (!ctx) {
+            res->error(format_error_response("Context not available", ERROR_TYPE_SERVER));
+            return res;
+        }
+        const int n_expert = llama_model_n_expert(ctx_server.model_tgt);
+        if (n_expert <= 0) {
+            res->error(format_error_response("Model is not MoE", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        const int n_layer = llama_model_n_layer(ctx_server.model_tgt);
+        json layers_json = json::array();
+        for (int il = 0; il < n_layer; ++il) {
+            llama_expert_stats stats = {};
+            if (llama_expert_stats_get(ctx, il, &stats) == 0 && stats.n_expert > 0) {
+                json act_counts = json::array();
+                for (int e = 0; e < stats.n_expert; ++e) {
+                    act_counts.push_back(stats.activation_count[e]);
+                }
+                layers_json.push_back({
+                    {"layer", il},
+                    {"n_expert", stats.n_expert},
+                    {"n_expert_used", stats.n_expert_used},
+                    {"total_tokens", stats.total_tokens},
+                    {"activation_count", act_counts},
+                });
+            }
+        }
+        llama_moe_residency_stats rstats = {};
+        llama_moe_residency_stats_get(ctx, &rstats);
+        json out = {
+            {"tracking_enabled", llama_expert_tracking_enabled(ctx)},
+            {"n_expert", n_expert},
+            {"n_expert_used", llama_model_n_expert_used(ctx_server.model_tgt)},
+            {"residency", {
+                {"hits", rstats.total_hits},
+                {"misses", rstats.total_misses},
+                {"evicted", rstats.total_evicted},
+                {"decodes", rstats.decode_count},
+                {"moe_layers", rstats.moe_layer_count},
+            }},
+            {"layers", layers_json},
+        };
+        res->ok(out);
+        return res;
+    };
+
+    this->post_expert_tracking = [this](const server_http_req & req) {
+        auto res = create_response();
+        llama_context * ctx = ctx_server.get_ctx_tgt();
+        if (!ctx) {
+            res->error(format_error_response("Context not available", ERROR_TYPE_SERVER));
+            return res;
+        }
+        const json body = json::parse(req.body);
+        const bool enable = json_value(body, "enable", true);
+        llama_expert_tracking_enable(ctx, enable);
+        res->ok({{"tracking_enabled", enable}});
         return res;
     };
 }
