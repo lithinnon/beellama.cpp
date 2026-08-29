@@ -285,10 +285,27 @@ bool server_radix_tree::remove_node(const std::shared_ptr<server_radix_node> & n
     for (auto it = parent->children.begin(); it != parent->children.end(); ++it) {
         if (it->child == node) {
             parent->children.erase(it);
+            prune_empty_leaves(parent);
             return true;
         }
     }
     return false;
+}
+
+void server_radix_tree::prune_empty_leaves(std::shared_ptr<server_radix_node> & node) {
+    if (!node || node == root) return;
+    if (node->children.empty() && (!node->is_checkpoint || node->tier == RADIX_TIER_EVICTED || node->tier == RADIX_TIER_NONE)) {
+        auto parent = node->parent.lock();
+        if (parent) {
+            for (auto it = parent->children.begin(); it != parent->children.end(); ++it) {
+                if (it->child == node) {
+                    parent->children.erase(it);
+                    prune_empty_leaves(parent);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void server_radix_tree::clear() {
