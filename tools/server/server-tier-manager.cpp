@@ -29,13 +29,7 @@ struct radix_chunk_header {
 server_tier_manager::server_tier_manager() = default;
 
 uint32_t server_tier_manager::compute_checksum(const uint8_t * data, size_t len) const {
-    // 32-bit FNV-1a hash
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= data[i];
-        hash *= 16777619u;
-    }
-    return hash;
+    return server_fnv1a(data, len);
 }
 
 bool server_tier_manager::init(const std::string & base_dir, int32_t quota_mib_in) {

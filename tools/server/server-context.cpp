@@ -1541,19 +1541,12 @@ private:
                     sanitized.pop_back();
                 }
 
-                uint32_t path_hash = 2166136261u;
-                for (char c : params_base.model.path) {
-                    path_hash ^= (unsigned char) c;
-                    path_hash *= 16777619u;
-                }
+                uint32_t path_hash = server_fnv1a(params_base.model.path);
                 std::error_code ec;
                 if (!params_base.model.path.empty() && std::filesystem::exists(params_base.model.path, ec)) {
                     size_t fsz = std::filesystem::file_size(params_base.model.path, ec);
                     if (!ec) {
-                        for (size_t i = 0; i < sizeof(fsz); ++i) {
-                            path_hash ^= (unsigned char) ((fsz >> (i * 8)) & 0xFF);
-                            path_hash *= 16777619u;
-                        }
+                        path_hash = server_fnv1a(&fsz, sizeof(fsz), path_hash);
                     }
                 }
                 char hash_buf[16];

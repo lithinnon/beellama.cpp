@@ -37,6 +37,21 @@ using json = common_json;
 
 using raw_buffer = std::vector<uint8_t>;
 
+// Reusable 32-bit FNV-1a hash helper for fingerprints and checksums
+inline uint32_t server_fnv1a(const void * data, size_t len, uint32_t seed = 2166136261u) {
+    uint32_t hash = seed;
+    const uint8_t * bytes = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= bytes[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+inline uint32_t server_fnv1a(const std::string & str, uint32_t seed = 2166136261u) {
+    return server_fnv1a(str.data(), str.size(), seed);
+}
+
 template <typename T>
 static T json_value(const json & body, const std::string & key, const T & default_value) {
     // Fallback null to default value
