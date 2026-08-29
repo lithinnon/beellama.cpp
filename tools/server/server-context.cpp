@@ -1548,7 +1548,7 @@ private:
                 if (resolved_disk_dir.empty()) {
                     resolved_disk_dir = "/tmp/beellama.cpp/radix";
                 }
-                if (std::filesystem::path(resolved_disk_dir).filename() == "radix") {
+                if (resolved_disk_dir.find(fingerprint) == std::string::npos) {
                     resolved_disk_dir = (std::filesystem::path(resolved_disk_dir) / fingerprint).string();
                 }
                 params_base.cache_disk_dir = resolved_disk_dir;
