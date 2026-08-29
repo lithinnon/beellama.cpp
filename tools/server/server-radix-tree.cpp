@@ -111,6 +111,16 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
         }
     }
 
+    // If destination node already had a disk chunk from an older checkpoint, remove the orphaned file
+    if (!curr->disk_chunk_id.empty()) {
+        if (std::filesystem::exists(curr->disk_chunk_id)) {
+            try {
+                std::filesystem::remove(curr->disk_chunk_id);
+            } catch (...) {}
+        }
+        curr->disk_chunk_id.clear();
+    }
+
     // Set state on destination node
     curr->prompt = prompt.clone();
     curr->data = std::move(data);
@@ -251,6 +261,13 @@ void server_radix_tree::evict_ram_payload(const std::shared_ptr<server_radix_nod
     node->data.main.shrink_to_fit();
     node->data.drft.shrink_to_fit();
     node->data.spec.shrink_to_fit();
+
+    for (auto & ckpt : node->prompt.checkpoints) {
+        ckpt.data_tgt.clear();
+        ckpt.data_dft.clear();
+        ckpt.data_spec.clear();
+        ckpt.data_spec.shrink_to_fit();
+    }
 
     if (!node->disk_chunk_id.empty()) {
         node->tier = RADIX_TIER_DISK;
