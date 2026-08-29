@@ -26,6 +26,18 @@ struct radix_chunk_header {
 };
 #pragma pack(pop)
 
+// RAII helper to ensure temporary chunk files are purged on failure/exception
+struct temp_file_guard {
+    std::string path;
+    ~temp_file_guard() {
+        if (!path.empty()) {
+            std::error_code ec;
+            fs::remove(path, ec);
+        }
+    }
+    void dismiss() { path.clear(); }
+};
+
 server_tier_manager::server_tier_manager() = default;
 
 uint32_t server_tier_manager::compute_checksum(const uint8_t * data, size_t len) const {
@@ -46,14 +58,14 @@ bool server_tier_manager::init(const std::string & base_dir, int32_t quota_mib_i
         return true;
     }
 
-    try {
-        if (!fs::exists(disk_dir)) {
-            fs::create_directories(disk_dir);
+    std::error_code ec;
+    if (!fs::exists(disk_dir, ec)) {
+        fs::create_directories(disk_dir, ec);
+        if (ec) {
+            SRV_ERR("failed to create radix cache disk directory %s: %s\n", disk_dir.c_str(), ec.message().c_str());
+            disk_quota_bytes = 0;
+            return false;
         }
-    } catch (const std::exception & e) {
-        SRV_ERR("failed to create radix cache disk directory %s: %s\n", disk_dir.c_str(), e.what());
-        disk_quota_bytes = 0;
-        return false;
     }
 
     cleanup_temp_files();
@@ -61,20 +73,19 @@ bool server_tier_manager::init(const std::string & base_dir, int32_t quota_mib_i
 }
 
 void server_tier_manager::cleanup_temp_files() {
-    if (disk_dir.empty() || !fs::exists(disk_dir)) {
+    std::error_code ec;
+    if (disk_dir.empty() || !fs::exists(disk_dir, ec)) {
         return;
     }
 
     try {
-        for (const auto & entry : fs::directory_iterator(disk_dir)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".tmp") {
+        for (const auto & entry : fs::directory_iterator(disk_dir, ec)) {
+            if (entry.is_regular_file(ec) && entry.path().extension() == ".tmp") {
                 SRV_TRC("removing orphaned radix cache tmp file: %s\n", entry.path().string().c_str());
-                fs::remove(entry.path());
+                fs::remove(entry.path(), ec);
             }
         }
-    } catch (const std::exception & e) {
-        SRV_WRN("warning during radix tmp cleanup: %s\n", e.what());
-    }
+    } catch (...) {}
 }
 
 bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> & node, server_radix_tree & tree) {
@@ -89,6 +100,8 @@ bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> 
                                std::to_string(node->last_accessed_time) + ".tmp";
     std::string ckpt_filename = disk_dir + "/chunk_" + std::to_string(node->id) + "_" +
                                 std::to_string(node->last_accessed_time) + ".ckpt";
+
+    temp_file_guard guard{tmp_filename};
 
     radix_chunk_header header {};
     header.magic = RADIX_CHUNK_MAGIC;
@@ -164,13 +177,23 @@ bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> 
         out.flush();
         out.close();
 
+        if (!out.good()) {
+            SRV_ERR("failed to write complete radix chunk to %s\n", tmp_filename.c_str());
+            return false;
+        }
+
         // Atomic rename
-        fs::rename(tmp_filename, ckpt_filename);
+        std::error_code ec;
+        fs::rename(tmp_filename, ckpt_filename, ec);
+        if (ec) {
+            SRV_ERR("failed to rename radix tmp file %s -> %s: %s\n",
+                    tmp_filename.c_str(), ckpt_filename.c_str(), ec.message().c_str());
+            return false;
+        }
+
+        guard.dismiss();
     } catch (const std::exception & e) {
         SRV_ERR("exception writing radix chunk to disk: %s\n", e.what());
-        if (fs::exists(tmp_filename)) {
-            fs::remove(tmp_filename);
-        }
         return false;
     }
 
@@ -183,7 +206,8 @@ bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> 
 }
 
 bool server_tier_manager::load_from_disk(const std::shared_ptr<server_radix_node> & node) {
-    if (!node || node->disk_chunk_id.empty() || !fs::exists(node->disk_chunk_id)) {
+    std::error_code ec;
+    if (!node || node->disk_chunk_id.empty() || !fs::exists(node->disk_chunk_id, ec) || ec) {
         return false;
     }
 
@@ -315,16 +339,16 @@ void server_tier_manager::enforce_ram_limit(server_radix_tree & tree, size_t lim
 
 static size_t compute_directory_ckpt_bytes(const std::string & path) {
     size_t total = 0;
-    try {
-        if (fs::exists(path)) {
-            for (const auto & entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".ckpt") {
-                    std::error_code ec;
+    std::error_code ec;
+    if (fs::exists(path, ec)) {
+        try {
+            for (const auto & entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".ckpt") {
                     total += entry.file_size(ec);
                 }
             }
-        }
-    } catch (...) {}
+        } catch (...) {}
+    }
     return total;
 }
 
@@ -364,7 +388,8 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
 
     // 2. Enforce global shared disk quota across all model subdirectories in root cache dir
     std::string root_scan_dir = fs::path(disk_dir).parent_path().string();
-    if (root_scan_dir.empty() || !fs::exists(root_scan_dir)) {
+    std::error_code ec_root;
+    if (root_scan_dir.empty() || !fs::exists(root_scan_dir, ec_root)) {
         root_scan_dir = disk_dir;
     }
 
@@ -377,8 +402,9 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
         };
         std::vector<disk_file_entry> all_files;
         try {
-            for (const auto & entry : fs::recursive_directory_iterator(root_scan_dir, fs::directory_options::skip_permission_denied)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".ckpt") {
+            std::error_code ec_it;
+            for (const auto & entry : fs::recursive_directory_iterator(root_scan_dir, fs::directory_options::skip_permission_denied, ec_it)) {
+                if (entry.is_regular_file(ec_it) && entry.path().extension() == ".ckpt") {
                     std::error_code ec;
                     auto wt = entry.last_write_time(ec);
                     auto sz = entry.file_size(ec);
