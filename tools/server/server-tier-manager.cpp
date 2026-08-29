@@ -240,8 +240,8 @@ bool server_tier_manager::load_from_disk(const std::shared_ptr<server_radix_node
             return false;
         }
 
-        // Read checkpoints
-        node->prompt.checkpoints.clear();
+        // Read checkpoints into local temporary list to guarantee atomic metadata commit
+        std::list<common_prompt_checkpoint> loaded_ckpts;
         for (uint32_t i = 0; i < header.n_checkpoints; ++i) {
             int64_t n_tokens_ckpt = 0;
             llama_pos pos_min = 0;
@@ -275,9 +275,10 @@ bool server_tier_manager::load_from_disk(const std::shared_ptr<server_radix_node
                 in.read(reinterpret_cast<char *>(ckpt.data_spec.data()), size_spc);
             }
 
-            node->prompt.checkpoints.push_back(std::move(ckpt));
+            loaded_ckpts.push_back(std::move(ckpt));
         }
 
+        node->prompt.checkpoints = std::move(loaded_ckpts);
         node->data = std::move(loaded_data);
         node->tier = RADIX_TIER_RAM;
         node->touch();
