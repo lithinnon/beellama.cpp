@@ -316,11 +316,27 @@ void server_tier_manager::enforce_ram_limit(server_radix_tree & tree, size_t lim
     }
 }
 
+static size_t compute_directory_ckpt_bytes(const std::string & path) {
+    size_t total = 0;
+    try {
+        if (fs::exists(path)) {
+            for (const auto & entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".ckpt") {
+                    std::error_code ec;
+                    total += entry.file_size(ec);
+                }
+            }
+        }
+    } catch (...) {}
+    return total;
+}
+
 void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
     if (disk_quota_bytes == 0 || disk_quota_bytes == (size_t) -1) {
         return;
     }
 
+    // 1. Enforce local tree disk limit
     while (tree.accounted_disk_bytes() > disk_quota_bytes) {
         auto disk_nodes = tree.get_lru_nodes(RADIX_TIER_DISK);
         if (disk_nodes.empty()) {
@@ -346,6 +362,61 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
         oldest->tier = RADIX_TIER_EVICTED;
         if (oldest->children.empty()) {
             tree.remove_node(oldest);
+        }
+    }
+
+    // 2. Enforce global shared disk quota across all model subdirectories in root cache dir
+    std::string root_scan_dir = fs::path(disk_dir).parent_path().string();
+    if (root_scan_dir.empty() || !fs::exists(root_scan_dir) || fs::path(root_scan_dir).filename() != "radix") {
+        root_scan_dir = disk_dir;
+    }
+
+    size_t total_global_bytes = compute_directory_ckpt_bytes(root_scan_dir);
+    if (total_global_bytes > disk_quota_bytes) {
+        struct disk_file_entry {
+            std::string path;
+            fs::file_time_type write_time;
+            size_t size;
+        };
+        std::vector<disk_file_entry> all_files;
+        try {
+            for (const auto & entry : fs::recursive_directory_iterator(root_scan_dir, fs::directory_options::skip_permission_denied)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".ckpt") {
+                    std::error_code ec;
+                    auto wt = entry.last_write_time(ec);
+                    auto sz = entry.file_size(ec);
+                    if (!ec) {
+                        all_files.push_back({ entry.path().string(), wt, sz });
+                    }
+                }
+            }
+        } catch (...) {}
+
+        std::sort(all_files.begin(), all_files.end(), [](const disk_file_entry & a, const disk_file_entry & b) {
+            return a.write_time < b.write_time;
+        });
+
+        for (const auto & file : all_files) {
+            if (total_global_bytes <= disk_quota_bytes) {
+                break;
+            }
+            SRV_INF("global disk quota: pruning oldest chunk '%s' (%.2f MiB)\n",
+                    file.path.c_str(), file.size / (1024.0 * 1024.0));
+            std::error_code ec;
+            if (fs::remove(file.path, ec)) {
+                total_global_bytes = (total_global_bytes > file.size) ? (total_global_bytes - file.size) : 0;
+                auto disk_nodes = tree.get_lru_nodes(RADIX_TIER_DISK);
+                for (auto & node : disk_nodes) {
+                    if (node->disk_chunk_id == file.path) {
+                        node->disk_chunk_id.clear();
+                        node->tier = RADIX_TIER_EVICTED;
+                        if (node->children.empty()) {
+                            tree.remove_node(node);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 }

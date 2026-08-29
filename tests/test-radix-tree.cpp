@@ -31,6 +31,21 @@ static server_prompt_data make_test_data(size_t main_size, size_t drft_size = 0)
     return data;
 }
 
+static size_t compute_directory_ckpt_bytes(const std::string & path) {
+    size_t total = 0;
+    try {
+        if (std::filesystem::exists(path)) {
+            for (const auto & entry : std::filesystem::recursive_directory_iterator(path)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".ckpt") {
+                    std::error_code ec;
+                    total += entry.file_size(ec);
+                }
+            }
+        }
+    } catch (...) {}
+    return total;
+}
+
 static void test_radix_tree_basic_insertion_and_search() {
     server_radix_tree tree;
 
@@ -314,83 +329,81 @@ static void test_radix_cache_recurrent_and_multiturn_state() {
 
 static void test_multimodel_cache_isolation_and_quotas() {
     std::string base_dir = "/tmp/beellama_radix_multimodel_test_" +
-                           std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+                           std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()) + "/radix";
     std::string dir_a = base_dir + "/gemma4_26b_q4km_k-bf16_v-bf16";
     std::string dir_b = base_dir + "/qwen2.5_7b_q4km_k-q4_0_v-q4_0";
 
     server_radix_tree tree_a;
     server_tier_manager mgr_a;
-    assert(mgr_a.init(dir_a, 2)); // 2 MiB quota for Model A
+    assert(mgr_a.init(dir_a, 4)); // 4 MiB global shared quota
 
     server_radix_tree tree_b;
     server_tier_manager mgr_b;
-    assert(mgr_b.init(dir_b, 2)); // 2 MiB quota for Model B
+    assert(mgr_b.init(dir_b, 4)); // 4 MiB global shared quota
 
-    // 1. Insert 3 separate 1MB chunks into Model A
+    // 1. Insert 2 separate 1MB chunks into Model A
     llama_tokens tokens_a1 = {10, 11, 12, 13};
     llama_tokens tokens_a2 = {10, 11, 12, 14};
-    llama_tokens tokens_a3 = {10, 11, 12, 15};
 
     auto n_a1 = tree_a.insert(make_test_prompt(tokens_a1), make_test_data(1024 * 1024));
     assert(mgr_a.save_to_disk(n_a1, tree_a));
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
     auto n_a2 = tree_a.insert(make_test_prompt(tokens_a2), make_test_data(1024 * 1024));
     assert(mgr_a.save_to_disk(n_a2, tree_a));
 
-    auto n_a3 = tree_a.insert(make_test_prompt(tokens_a3), make_test_data(1024 * 1024));
-    assert(mgr_a.save_to_disk(n_a3, tree_a)); // Total 3 MB > 2 MB quota -> evicts oldest (n_a1)
-
-    // Verify Model A directory state
-    assert(n_a1->tier == RADIX_TIER_EVICTED);
+    // Verify Model A has 2 chunks (2 MB <= 4 MB quota)
+    assert(n_a1->tier == RADIX_TIER_DISK);
     assert(n_a2->tier == RADIX_TIER_DISK);
-    assert(n_a3->tier == RADIX_TIER_DISK);
-    assert(tree_a.accounted_disk_bytes() <= 2 * 1024 * 1024);
 
     // 2. Insert 3 separate 1MB chunks into Model B
+    // Total across both models becomes ~5 MB > 4 MB global quota -> triggers global scavenging of oldest chunk (n_a1)
     llama_tokens tokens_b1 = {100, 101, 102, 103};
     llama_tokens tokens_b2 = {100, 101, 102, 104};
     llama_tokens tokens_b3 = {100, 101, 102, 105};
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
     auto n_b1 = tree_b.insert(make_test_prompt(tokens_b1), make_test_data(1024 * 1024));
     assert(mgr_b.save_to_disk(n_b1, tree_b));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     auto n_b2 = tree_b.insert(make_test_prompt(tokens_b2), make_test_data(1024 * 1024));
     assert(mgr_b.save_to_disk(n_b2, tree_b));
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
     auto n_b3 = tree_b.insert(make_test_prompt(tokens_b3), make_test_data(1024 * 1024));
-    assert(mgr_b.save_to_disk(n_b3, tree_b)); // Total 3 MB > 2 MB quota -> evicts oldest (n_b1)
+    assert(mgr_b.save_to_disk(n_b3, tree_b));
 
-    // Verify Model B directory state
-    assert(n_b1->tier == RADIX_TIER_EVICTED);
-    assert(n_b2->tier == RADIX_TIER_DISK);
-    assert(n_b3->tier == RADIX_TIER_DISK);
-    assert(tree_b.accounted_disk_bytes() <= 2 * 1024 * 1024);
-
-    // 3. Verify Model A's files in dir_a were completely untouched by Model B
-    assert(n_a2->tier == RADIX_TIER_DISK);
-    assert(n_a3->tier == RADIX_TIER_DISK);
-    assert(fs::exists(n_a2->disk_chunk_id));
-    assert(fs::exists(n_a3->disk_chunk_id));
-    assert(mgr_a.load_from_disk(n_a2));
-    assert(n_a2->tier == RADIX_TIER_RAM);
-
-    // 4. Verify Model B files in dir_b load cleanly into Model B
+    // 3. Verify Global Scavenging: the 2 globally oldest files across all models (n_a1, n_a2) were deleted
+    assert(!fs::exists(n_a1->disk_chunk_id));
+    assert(!fs::exists(n_a2->disk_chunk_id));
+    assert(fs::exists(n_b1->disk_chunk_id));
     assert(fs::exists(n_b2->disk_chunk_id));
     assert(fs::exists(n_b3->disk_chunk_id));
-    assert(mgr_b.load_from_disk(n_b2));
-    assert(n_b2->tier == RADIX_TIER_RAM);
+
+    // Total disk footprint across all model subdirectories in base_dir must be <= 4 MiB
+    size_t total_disk = compute_directory_ckpt_bytes(base_dir);
+    assert(total_disk <= 4 * 1024 * 1024);
+
+    // 4. Verify Model B can load its retained chunks cleanly
+    assert(mgr_b.load_from_disk(n_b3));
+    assert(n_b3->tier == RADIX_TIER_RAM);
 
     // 5. Verify cross-model prefix query isolation
-    server_tokens req_b(tokens_b2, false);
+    server_tokens req_b(tokens_b3, false);
     auto res_a = tree_a.find_best_match(req_b, 1, 0);
-    assert(res_a.restorable_tokens == 0); // Model A finds 0 match for Model B tokens
+    assert(res_a.restorable_tokens == 0);
 
     server_tokens req_a(tokens_a2, false);
     auto res_b = tree_b.find_best_match(req_a, 1, 0);
-    assert(res_b.restorable_tokens == 0); // Model B finds 0 match for Model A tokens
+    assert(res_b.restorable_tokens == 0);
 
     // Cleanup
-    std::filesystem::remove_all(base_dir);
+    std::filesystem::remove_all(fs::path(base_dir).parent_path());
 }
 
 int main() {
