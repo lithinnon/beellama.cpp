@@ -71,14 +71,36 @@ RXC decouples KV-cache retention from GPU VRAM limits by managing three tiers of
 +-------------------------------------------------------------------------+
 ```
 
-### Storage Quota Scavenging
-- **Host RAM (`--cache-ram`, `-cram`):** Limits total memory occupied by warm Radix checkpoints. Setting `-cram -1` allows unlimited RAM utilization.
-- **NVMe Disk (`--cache-disk`, `-cdisk`):** Limits persistent SSD storage. Setting `-cdisk -1` allows unlimited disk caching up to physical drive capacity.
+### Storage Quota Scavenging & Multi-Model Sharing
+- **Host RAM (`--cache-ram`, `-cram`):** Limits total memory occupied by warm Radix checkpoints. Setting `-cram -1` allows unlimited RAM utilization. Setting `-cram 0` completely disables host RAM retention and streams checkpoints directly to NVMe SSD with true 0-RAM overhead.
+- **NVMe Disk (`--cache-disk`, `-cdisk`):** Global persistent SSD quota in MiB. Setting `-cdisk -1` allows unlimited disk caching up to physical drive capacity.
+- **Global Root Scavenging:** When `--cache-disk` is configured, the disk limit applies globally across all model subdirectories in `~/.cache/beellama.cpp/radix/`. If the combined footprint exceeds the quota, cross-model LRU scavenging automatically purges the globally oldest `.ckpt` files first.
 - **Eviction Policies (`--radix-eviction`):** When quotas are reached, colder nodes are selected via `lru` (Least Recently Used), `lfu` (Least Frequently Used), or `cost` (recomputation cost = token count $\times$ access frequency).
 
 ---
 
-## 3. KVarN & Precision Tail Integration
+## 3. Automatic Model & Quantization Isolation
+
+To eliminate vocabulary collisions, tensor shape mismatches, and quantization drift across model switches, BeeLlama automatically isolates disk checkpoints into dedicated model fingerprint subfolders:
+
+$$\text{Subdirectory} = \texttt{<model\_name>}\_\texttt{<quant>}\_\texttt{k-<ctk>}\_\texttt{v-<ctv>}$$
+
+```
+~/.cache/beellama.cpp/radix/
+├── gemma4_26b_a4b_q4_k_medium_k-bf16_v-bf16/
+│   ├── chunk_1_35767465.ckpt
+│   └── chunk_3_35767518.ckpt
+└── qwen2.5_7b_instruct_q4_k_m_k-q4_0_v-q4_0/
+    ├── chunk_1_35856028.ckpt
+    └── chunk_2_35856035.ckpt
+```
+
+- **Seamless Switching:** You can serve Gemma 4 in the morning and Qwen 2.5 in the afternoon without manually altering cache directories.
+- **Custom Overrides:** If you provide a custom path (e.g. `--cache-disk-dir /mnt/nvme/my_cache`), BeeLlama automatically constructs isolated fingerprint folders within your target directory.
+
+---
+
+## 4. KVarN & Precision Tail Integration
 
 ### 128-Token Descriptor Alignment
 BeeLlama's KVarN target KV-cache compression groups attention state into 128-token rotated and normalized tiles (`KVAR_N_GROUP = 128`).
@@ -89,7 +111,7 @@ BeeLlama's KVarN target KV-cache compression groups attention state into 128-tok
 
 ---
 
-## 4. Checkpoint Strategies & Modes
+## 5. Checkpoint Strategies & Modes
 
 RXC provides granular control over when KV-cache states are snapshotted:
 
@@ -105,14 +127,14 @@ RXC provides granular control over when KV-cache states are snapshotted:
 
 ---
 
-## 5. Crash Resilience & Atomic Disk I/O
+## 6. Crash Resilience & Atomic Disk I/O
 
 To guarantee zero cache corruption across server crashes or power failures:
 
 1. **Two-Phase Atomic Commits:**
    - Checkpoint payloads are written to a temporary file (`.ckpt.tmp.<pid>.<uuid>`).
    - The file is flushed to physical NVMe media via POSIX `fsync()`.
-   - The file is atomically renamed to its canonical chunk path (`<hash>.ckpt`).
+   - The file is atomically renamed to its canonical chunk path (`chunk_<id>_<hash>.ckpt`).
 2. **Checksum Verification:**
    - Every `.ckpt` chunk header includes an FNV-1a checksum of the payload.
    - Corrupt or truncated chunks are automatically detected and discarded.
@@ -121,7 +143,7 @@ To guarantee zero cache corruption across server crashes or power failures:
 
 ---
 
-## 6. Multimodal & M-RoPE Support
+## 7. Multimodal & M-RoPE Support
 
 RXC natively tracks multimodal media chunks (images, audio) and M-RoPE 2D/3D positional metadata within token sequences:
 - Media chunks are identified by `LLAMA_TOKEN_NULL` token placeholders linked to their underlying high-dimensional feature embeddings.
@@ -129,15 +151,15 @@ RXC natively tracks multimodal media chunks (images, audio) and M-RoPE 2D/3D pos
 
 ---
 
-## 7. CLI Flags & Environment Variables
+## 8. CLI Flags & Environment Variables
 
 | Short | Long Flag | Environment Variable | Default | Description |
 |---|---|---|---|---|
 | `-rxc` | `--radix-cache` | `LLAMA_ARG_RADIX_CACHE` | `true` (server) | Enables dynamic Radix Tree prefix caching. |
 | `-no-rxc`| `--no-radix-cache`| — | — | Disables Radix Tree prefix caching. |
-| `-cram` | `--cache-ram N` | `LLAMA_ARG_CACHE_RAM` | `8192` | Host RAM quota in MiB (`-1` = unlimited, `0` = disabled). |
-| `-cdisk`| `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | NVMe SSD quota in MiB (`-1` = unlimited, `0` = disabled). |
-| — | `--cache-disk-dir PATH`| `LLAMA_ARG_CACHE_DISK_DIR` | `~/.cache/beellama.cpp/radix` | Directory path for disk `.ckpt` files. |
+| `-cram` | `--cache-ram N` | `LLAMA_ARG_CACHE_RAM` | `8192` | Host RAM quota in MiB (`-1` = unlimited, `0` = direct NVMe spill). |
+| `-cdisk`| `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | Global NVMe SSD quota in MiB (`-1` = unlimited, `0` = disabled). |
+| — | `--cache-disk-dir PATH`| `LLAMA_ARG_CACHE_DISK_DIR` | `~/.cache/beellama.cpp/radix` | Root directory path for disk `.ckpt` files. |
 | `-cm` | `--checkpoint-mode MODE`| `LLAMA_ARG_CHECKPOINT_MODE`| `turn` (with radix) | Trigger policy: `turn`, `step`, `both`, or `off`. |
 | `-cms` | `--checkpoint-min-step N`| `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT`| `0` (with radix) | Intra-prompt checkpoint token interval. |
 | `-ctxcp`| `--ctx-checkpoints N`| `LLAMA_ARG_CTX_CHECKPOINTS` | `32` | Max checkpoints retained along a single branch. |
@@ -145,7 +167,7 @@ RXC natively tracks multimodal media chunks (images, audio) and M-RoPE 2D/3D pos
 
 ---
 
-## 8. Practical Deployment Examples
+## 9. Practical Deployment Examples
 
 ### Example 1: Multi-Turn Server with RAM Caching (Default Setup)
 Serves chat with 16 GB Host RAM allocated for instant prefix reuse:
@@ -158,16 +180,15 @@ llama-server \
   --port 8080
 ```
 
-### Example 2: Ultra-Low VRAM + NVMe SSD Offloading
-Offloads long document KV states to NVMe SSD (100 GB disk cache):
+### Example 2: APU / UMA 0-RAM Direct NVMe Spill (Strix Halo / Radeon 8060S)
+Spills warm checkpoints directly to NVMe SSD without duplicate host RAM consumption:
 ```bash
 llama-server \
-  -m models/gemma-4-31b-q4_k_m.gguf \
-  -c 65536 -b 2048 -ub 512 \
-  -ctk kvarn4 -ctv kvarn3 \
-  -rxc -cram 4096 -cdisk 102400 \
-  --cache-disk-dir /mnt/fast-nvme/beellama-radix \
-  -cm turn \
+  -m models/gemma-4-26b-a4b.gguf \
+  -c 32768 -b 1024 -ub 1024 -ngl all \
+  -cram 0 -cdisk 16384 -cm turn \
+  --load-mode dio \
+  -ctk bf16 -ctv bf16 -fa on \
   --port 8080
 ```
 
@@ -183,7 +204,27 @@ llama-server \
 
 ---
 
-## 9. Observability & Telemetry
+## 10. Observability & Telemetry
+
+### OpenAI API Response Telemetry
+Standard `/v1/chat/completions` responses expose cached token breakdowns:
+```json
+{
+  "usage": {
+    "prompt_tokens": 1024,
+    "completion_tokens": 64,
+    "total_tokens": 1088,
+    "prompt_tokens_details": {
+      "cached_tokens": 896
+    }
+  },
+  "timings": {
+    "cache_source": "live_plan",
+    "cache_n": 896,
+    "prompt_ms": 112.4
+  }
+}
+```
 
 ### Server Logs
 During prompt evaluation, `llama-server` logs Radix hit diagnostics:
