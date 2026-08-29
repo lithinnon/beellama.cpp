@@ -1942,7 +1942,11 @@ server_prompt_cache_state * server_prompt_cache::insert(
     server_prompt_cache_state candidate;
     candidate.prompt = prompt.clone();
     candidate.data = std::move(data);
-    return admit(std::move(candidate));
+    auto * res = admit(std::move(candidate));
+    if (limit_size == 0 && tier_manager && tier_manager->is_disk_enabled()) {
+        states.clear();
+    }
+    return res;
 }
 
 server_prompt_cache_state * server_prompt_cache::alloc(
