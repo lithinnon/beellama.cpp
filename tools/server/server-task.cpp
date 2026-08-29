@@ -1782,7 +1782,7 @@ server_prompt_cache::server_prompt_cache(
         bool radix_enabled,
         int32_t disk_quota_mib,
         const std::string & disk_dir) {
-    this->limit_size    = 1024ull * 1024ull * (limit_size_mib < 0 ? 0 : limit_size_mib);
+    this->limit_size    = (limit_size_mib < 0) ? (size_t) -1 : (1024ull * 1024ull * limit_size_mib);
     this->limit_tokens  = limit_tokens;
     this->radix_enabled = radix_enabled;
 
@@ -1934,7 +1934,7 @@ server_prompt_cache_state * server_prompt_cache::insert(
         data_copy.drft = data.drft;
         data_copy.spec = data.spec;
         radix_tree->insert(prompt, std::move(data_copy));
-        if (tier_manager && limit_size > 0) {
+        if (tier_manager) {
             tier_manager->enforce_ram_limit(*radix_tree, limit_size);
         }
     }
