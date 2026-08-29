@@ -312,6 +312,9 @@ void server_tier_manager::enforce_ram_limit(server_radix_tree & tree, size_t lim
             SRV_TRC("evicting cold radix node %lu from RAM (%.3f MiB)\n",
                     (unsigned long)oldest->id, oldest->accounted_size() / (1024.0 * 1024.0));
             tree.evict_ram_payload(oldest);
+            if (oldest->children.empty()) {
+                tree.remove_node(oldest);
+            }
         }
     }
 }
