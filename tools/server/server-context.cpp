@@ -683,6 +683,13 @@ struct server_slot {
             // do not keep context of the child slots - the parent's context is enough
             if (task->is_child()) {
                 prompt_clear();
+            } else {
+                for (auto & ckpt : prompt.checkpoints) {
+                    ckpt.data_tgt.clear();
+                    ckpt.data_dft.clear();
+                    ckpt.data_spec.clear();
+                    ckpt.data_spec.shrink_to_fit();
+                }
             }
 
             callback_on_reset(*this);
@@ -1506,6 +1513,45 @@ private:
                 SRV_TRC("prompt cache is enabled, RAM size limit: %d MiB\n", params_base.cache_ram_mib);
             }
             if (params_base.cache_disk_mib != 0) {
+                std::string resolved_disk_dir = params_base.cache_disk_dir;
+                char desc[256] = {0};
+                if (model_tgt) {
+                    llama_model_desc(model_tgt, desc, sizeof(desc));
+                }
+                std::string base_id;
+                if (desc[0] != '\0') {
+                    base_id = desc;
+                } else if (!params_base.model.path.empty()) {
+                    base_id = std::filesystem::path(params_base.model.path).stem().string();
+                } else {
+                    base_id = "default_model";
+                }
+
+                std::string sanitized;
+                for (char c : base_id) {
+                    if (std::isalnum((unsigned char) c)) {
+                        sanitized += (char) std::tolower((unsigned char) c);
+                    } else if (c == ' ' || c == '-' || c == '_' || c == '.') {
+                        if (sanitized.empty() || sanitized.back() != '_') {
+                            sanitized += '_';
+                        }
+                    }
+                }
+                while (!sanitized.empty() && sanitized.back() == '_') {
+                    sanitized.pop_back();
+                }
+
+                const char * tk_name = ggml_type_name(params_base.cache_type_k);
+                const char * tv_name = ggml_type_name(params_base.cache_type_v);
+                const std::string fingerprint = sanitized + "_k-" + (tk_name ? tk_name : "unknown") + "_v-" + (tv_name ? tv_name : "unknown");
+
+                if (resolved_disk_dir.empty()) {
+                    resolved_disk_dir = "/tmp/beellama.cpp/radix";
+                }
+                if (std::filesystem::path(resolved_disk_dir).filename() == "radix") {
+                    resolved_disk_dir = (std::filesystem::path(resolved_disk_dir) / fingerprint).string();
+                }
+                params_base.cache_disk_dir = resolved_disk_dir;
                 SRV_TRC("prompt cache disk tier enabled, quota: %d MiB, dir: %s\n",
                         params_base.cache_disk_mib, params_base.cache_disk_dir.c_str());
             }

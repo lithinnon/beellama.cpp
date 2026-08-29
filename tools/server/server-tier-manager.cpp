@@ -344,5 +344,8 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
 
         oldest->disk_chunk_id.clear();
         oldest->tier = RADIX_TIER_EVICTED;
+        if (oldest->children.empty()) {
+            tree.remove_node(oldest);
+        }
     }
 }
