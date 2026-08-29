@@ -1541,9 +1541,27 @@ private:
                     sanitized.pop_back();
                 }
 
+                uint32_t path_hash = 2166136261u;
+                for (char c : params_base.model.path) {
+                    path_hash ^= (unsigned char) c;
+                    path_hash *= 16777619u;
+                }
+                std::error_code ec;
+                if (!params_base.model.path.empty() && std::filesystem::exists(params_base.model.path, ec)) {
+                    size_t fsz = std::filesystem::file_size(params_base.model.path, ec);
+                    if (!ec) {
+                        for (size_t i = 0; i < sizeof(fsz); ++i) {
+                            path_hash ^= (unsigned char) ((fsz >> (i * 8)) & 0xFF);
+                            path_hash *= 16777619u;
+                        }
+                    }
+                }
+                char hash_buf[16];
+                snprintf(hash_buf, sizeof(hash_buf), "%06x", path_hash & 0xFFFFFF);
+
                 const char * tk_name = ggml_type_name(params_base.cache_type_k);
                 const char * tv_name = ggml_type_name(params_base.cache_type_v);
-                const std::string fingerprint = sanitized + "_k-" + (tk_name ? tk_name : "unknown") + "_v-" + (tv_name ? tv_name : "unknown");
+                const std::string fingerprint = sanitized + "_" + hash_buf + "_k-" + (tk_name ? tk_name : "unknown") + "_v-" + (tv_name ? tv_name : "unknown");
 
                 if (resolved_disk_dir.empty()) {
                     resolved_disk_dir = "/tmp/beellama.cpp/radix";
