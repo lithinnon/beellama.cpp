@@ -9,6 +9,8 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "server-common.h"
+#include "server-radix-tree.h"
+#include "server-tier-manager.h"
 
 #include <sstream>
 
@@ -1770,10 +1772,28 @@ json server_task_result_get_lora::to_json() {
 //
 // server_task_result_apply_lora
 //
-
 json server_task_result_apply_lora::to_json() {
     return json {{ "success", true }};
 }
+
+server_prompt_cache::server_prompt_cache(
+        int32_t limit_size_mib,
+        size_t limit_tokens,
+        bool radix_enabled,
+        int32_t disk_quota_mib,
+        const std::string & disk_dir) {
+    this->limit_size    = 1024ull * 1024ull * (limit_size_mib < 0 ? 0 : limit_size_mib);
+    this->limit_tokens  = limit_tokens;
+    this->radix_enabled = radix_enabled;
+
+    if (this->radix_enabled) {
+        radix_tree   = std::make_unique<server_radix_tree>();
+        tier_manager = std::make_unique<server_tier_manager>();
+        tier_manager->init(disk_dir, disk_quota_mib);
+    }
+}
+
+server_prompt_cache::~server_prompt_cache() = default;
 
 size_t server_prompt_cache::accounted_size() const {
     size_t res = 0;
@@ -1794,6 +1814,10 @@ size_t server_prompt_cache::accounted_size() const {
         }
     }
 
+    if (res == 0 && radix_enabled && radix_tree) {
+        res = radix_tree->accounted_ram_bytes();
+    }
+
     return res;
 }
 
@@ -1802,6 +1826,10 @@ size_t server_prompt_cache::n_tokens() const {
 
     for (const auto & state : states) {
         res += state.prompt.n_tokens();
+    }
+
+    if (res == 0 && radix_enabled && radix_tree) {
+        res = radix_tree->total_tokens();
     }
 
     return res;
@@ -1900,6 +1928,17 @@ server_prompt_cache_state * server_prompt_cache::admit(server_prompt_cache_state
 server_prompt_cache_state * server_prompt_cache::insert(
         const server_prompt & prompt,
         server_prompt_data && data) {
+    if (radix_enabled && radix_tree) {
+        server_prompt_data data_copy;
+        data_copy.main = data.main;
+        data_copy.drft = data.drft;
+        data_copy.spec = data.spec;
+        radix_tree->insert(prompt, std::move(data_copy));
+        if (tier_manager && limit_size > 0) {
+            tier_manager->enforce_ram_limit(*radix_tree, limit_size);
+        }
+    }
+
     server_prompt_cache_state candidate;
     candidate.prompt = prompt.clone();
     candidate.data = std::move(data);
@@ -1927,6 +1966,9 @@ bool server_prompt_cache::erase(const server_prompt_cache_state * entry) {
     for (auto it = states.begin(); it != states.end(); ++it) {
         if (&*it == entry) {
             states.erase(it);
+            if (radix_enabled && radix_tree && states.empty()) {
+                radix_tree->clear();
+            }
             return true;
         }
     }
@@ -2136,6 +2178,43 @@ bool server_prompt_cache::load(
 
         prompt = it_best->prompt.clone();
         ++restore_successes;
+        ++radix_hits_ram;
+        return true;
+    }
+
+    // Check if Radix Tree disk tier holds a restorable chunk
+    if (radix_enabled && radix_tree && tier_manager && tier_manager->is_disk_enabled()) {
+        auto match = radix_tree->find_best_match(tokens_new, reuse_alignment, live_native_restorable_tokens);
+        if (match.node && match.node->tier == RADIX_TIER_DISK && match.restorable_tokens > live_native_restorable_tokens) {
+            ++restore_attempts;
+            if (!tier_manager->load_from_disk(match.node)) {
+                ++restore_failures;
+                return false;
+            }
+            ++radix_hits_disk;
+
+            auto & data = match.node->data;
+            if (data.main.empty() ||
+                    io.has_draft != !data.drft.empty() ||
+                    (!io.has_speculative && !data.spec.empty()) ||
+                    !io.restore_transaction) {
+                ++restore_failures;
+                return false;
+            }
+
+            if (!io.restore_transaction(
+                        data.main.data(), data.main.size(),
+                        data.drft.data(), data.drft.size(),
+                        data.spec.data(), data.spec.size())) {
+                ++restore_failures;
+                return false;
+            }
+
+            prompt = match.node->prompt.clone();
+            match.node->touch();
+            ++restore_successes;
+            return true;
+        }
     }
 
     return true;

@@ -39,7 +39,7 @@ static std::string capture_stderr(const std::function<void()> & fn) {
     const int stderr_fd = fileno(stderr);
     const int saved_fd  = dup(stderr_fd);
     assert(saved_fd >= 0);
-    assert(dup2(fileno(capture), stderr_fd) == 0);
+    assert(dup2(fileno(capture), stderr_fd) == stderr_fd);
 #endif
 
     fn();
@@ -56,7 +56,7 @@ static std::string capture_stderr(const std::function<void()> & fn) {
     assert(_dup2(saved_fd, stderr_fd) == 0);
     _close(saved_fd);
 #else
-    assert(dup2(saved_fd, stderr_fd) == 0);
+    assert(dup2(saved_fd, stderr_fd) == stderr_fd);
     close(saved_fd);
 #endif
     fclose(capture);
@@ -816,6 +816,36 @@ static void test(void) {
     assert(params.lora_adapters[1].path == "file2,2.gguf");
     assert(params.lora_adapters[2].path == "file3\"3\".gguf");
     assert(params.lora_adapters[3].path == "file4\".gguf");
+
+    // test Radix Cache options
+    params = common_params();
+    argv = {
+        "binary_name",
+        "-rxc",
+        "-cdisk", "16384",
+        "--cache-disk-dir", "/tmp/test_rxc_disk",
+        "-cm", "turn",
+        "--radix-eviction", "cost"
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.radix_cache == true);
+    assert(params.cache_disk_mib == 16384);
+    assert(params.cache_disk_dir == "/tmp/test_rxc_disk");
+    assert(params.checkpoint_mode == "turn");
+    assert(params.radix_eviction == "cost");
+
+    // test -no-rxc and unlimited disk
+    params = common_params();
+    argv = {
+        "binary_name",
+        "-no-rxc",
+        "-cdisk", "-1",
+        "-cm", "both"
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.radix_cache == false);
+    assert(params.cache_disk_mib == -1);
+    assert(params.checkpoint_mode == "both");
 
 // skip this part on windows, because setenv is not supported
 #ifdef _WIN32

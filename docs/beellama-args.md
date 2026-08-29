@@ -261,6 +261,31 @@ build host cannot detect it. Pre-Turing support remains runtime-unqualified
 until matching real devices pass the KVarN parity, memory, and model-smoke
 tests.
 
+## Radix Cache (RXC) and hierarchical caching
+
+Hierarchical Radix Cache (RXC) indexes prompt prefixes into an in-memory Radix Tree
+(Trie) managing active GPU VRAM slots, Host System RAM (`--cache-ram`), and
+persistent NVMe disk (`--cache-disk`). It automatically reuses prefix states
+across multi-turn conversations and concurrent requests without requiring manual
+slot save/restore API commands.
+
+Durable Radix node checkpoints enforce 128-token descriptor alignment
+(`KVAR_N_GROUP = 128`) when KVarN target caches are active, preserving F16/BF16
+precision-tail overlays and exact staging rows. When Host RAM exceeds
+`--cache-ram`, colder leaf nodes are spilled to `--cache-disk` as immutable
+`.ckpt` chunks and restored on demand.
+
+| Argument | Env var | Default | Behavior |
+|---|---|---|---|
+| `-rxc`, `--radix-cache`, `--no-radix-cache` | `LLAMA_ARG_RADIX_CACHE` | `true` on server | Enables dynamic Radix tree prefix caching. Replaces the linear LCP prompt scanner. |
+| `-cram N`, `--cache-ram N` | `LLAMA_ARG_CACHE_RAM` | `8192` | Maximum Host RAM quota in MiB for warm Radix checkpoints. Setting `0` disables host-memory caching; `-1` removes the memory ceiling. |
+| `-cdisk N`, `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | Maximum NVMe/SSD disk quota in MiB for cold Radix checkpoint chunks. `0` disables disk offloading; `-1` removes the quota (bound only by physical disk capacity). |
+| `--cache-disk-dir PATH` | `LLAMA_ARG_CACHE_DISK_DIR` | `${XDG_CACHE_HOME:-~/.cache}/beellama.cpp/radix` | Directory path for storing spilled `.ckpt` chunks. Falls back to `/tmp/beellama.cpp/radix` if home directory is unavailable. |
+| `-cm MODE`, `--checkpoint-mode MODE` | `LLAMA_ARG_CHECKPOINT_MODE` | `step` | Checkpoint trigger policy: `step` evaluates step-based checkpoints; `turn` captures state at the end of each conversation turn (zero prefill latency); `both` captures at turn ends and intermediate prefill steps; `off` disables state snapshots. |
+| `-cms N`, `--checkpoint-min-step N` | `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT` | `0` (with radix) / `8192` | Minimum token interval for intra-prompt prefill checkpoints. Defaults to `0` (disabled during prefill) when `--radix-cache` is enabled without an explicit `-cms`. |
+| `-ctxcp N`, `--ctx-checkpoints N` | `LLAMA_ARG_CTX_CHECKPOINTS` | `32` | Maximum historical snapshot anchors retained along any single root-to-leaf path in the Radix Tree. Prevents snapshot bloat on long multi-turn sessions by thinning intermediate older turn snapshots while keeping recent turns exact. |
+| `--radix-eviction POLICY` | `LLAMA_ARG_RADIX_EVICTION` | `lru` | Eviction strategy when RAM or disk quotas are reached (`lru`, `lfu`, or `cost`). |
+
 ## Migration from earlier versions
 
 | Earlier spelling or surface | v0.4.0 behavior | Replacement |

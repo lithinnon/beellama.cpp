@@ -407,6 +407,7 @@ struct server_slot {
             size_t live_native_restorable_tokens,
             int32_t reuse_alignment) {
         const uint64_t restored_before = prompt_cache.restore_successes;
+        const uint64_t disk_hits_before = prompt_cache.radix_hits_disk;
         bool res = prompt_cache.load(
                 prompt, tokens, ctx_tgt, ctx_dft, spec, id,
                 live_native_restorable_tokens, reuse_alignment);
@@ -414,8 +415,13 @@ struct server_slot {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
             prompt_cache_reason = "ram_restore_failed";
         } else if (prompt_cache.restore_successes != restored_before) {
-            prompt_cache_source = "ram";
-            prompt_cache_reason = "ram_restore_committed";
+            if (prompt_cache.radix_hits_disk != disk_hits_before) {
+                prompt_cache_source = "disk";
+                prompt_cache_reason = "disk_restore_committed";
+            } else {
+                prompt_cache_source = "ram";
+                prompt_cache_reason = "ram_restore_committed";
+            }
         }
 
         return res;
@@ -1493,17 +1499,26 @@ private:
             batch.init(std::max(n_batch, params_base.n_parallel), n_embd);
         }
 
-        if (params_base.cache_ram_mib != 0) {
+        if (params_base.cache_ram_mib != 0 || params_base.cache_disk_mib != 0) {
             if (params_base.cache_ram_mib < 0) {
-                SRV_TRC("prompt cache is enabled, size limit: %s\n", "no limit");
+                SRV_TRC("prompt cache is enabled, RAM size limit: %s\n", "no limit");
             } else {
-                SRV_TRC("prompt cache is enabled, size limit: %d MiB\n", params_base.cache_ram_mib);
+                SRV_TRC("prompt cache is enabled, RAM size limit: %d MiB\n", params_base.cache_ram_mib);
+            }
+            if (params_base.cache_disk_mib != 0) {
+                SRV_TRC("prompt cache disk tier enabled, quota: %d MiB, dir: %s\n",
+                        params_base.cache_disk_mib, params_base.cache_disk_dir.c_str());
             }
             SRV_TRC("%s", "use `--cache-ram 0` to disable the prompt cache\n");
 
-            prompt_cache = std::make_unique<server_prompt_cache>(params_base.cache_ram_mib, n_ctx);
+            prompt_cache = std::make_unique<server_prompt_cache>(
+                    params_base.cache_ram_mib,
+                    n_ctx,
+                    params_base.radix_cache,
+                    params_base.cache_disk_mib,
+                    params_base.cache_disk_dir);
         } else {
-            SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
+            SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` or `--cache-disk N` to enable it\n");
         }
         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
@@ -4466,6 +4481,13 @@ private:
                 // release slot because of stop condition
                 slot.print_timings();
                 send_final_response(slot);
+                metrics_on_prediction(slot);
+
+                if (prompt_cache && (params_base.checkpoint_mode == "turn" || params_base.checkpoint_mode == "both")) {
+                    slot.prompt_save(*prompt_cache);
+                    prompt_cache->update();
+                }
+
                 slot.release();
 
                 return;
@@ -4637,6 +4659,13 @@ private:
                 if (!process_token(result, slot)) {
                     slot.print_timings();
                     send_final_response(slot);
+                    metrics_on_prediction(slot);
+
+                    if (prompt_cache && (params_base.checkpoint_mode == "turn" || params_base.checkpoint_mode == "both")) {
+                        slot.prompt_save(*prompt_cache);
+                        prompt_cache->update();
+                    }
+
                     slot.release();
 
                     return;

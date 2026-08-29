@@ -673,9 +673,58 @@ process exit as a failed measurement rather than a score.
 The base file is tied to its vocabulary, evaluation tokens, and context size.
 It is a measurement artifact, not a portable model format.
 
+## Hierarchical Radix Cache (RXC) and multi-tier prefix caching
+
+### What it is
+
+BeeLlama's server-level Hierarchical Radix Cache (RXC) dynamically indexes token
+prefixes in an in-memory Radix Tree (Trie) across a 3-tier storage hierarchy:
+active GPU VRAM slots, Host System RAM (`--cache-ram`), and persistent NVMe/SSD
+disk (`--cache-disk`). It eliminates manual slot save/restore workflows by
+automatically matching, branching, and reusing KV cache prefixes for multi-turn
+conversations, few-shot prompts, and document analysis.
+
+Durable Radix node checkpoints preserve KVarN 128-token descriptor alignment
+(`KVAR_N_GROUP = 128`) and F16/BF16 KV Cache Precision Tails. For Sliding Window
+Attention (SWA) and recurrent architectures, state snapshots are captured at
+turn boundaries and step milestones.
+
+### When to use it
+
+Use Radix Cache in multi-turn chat applications, document Q&A, or high-concurrency
+server workloads where multiple requests share common system prompts or branching
+histories. Use NVMe disk offloading (`--cache-disk`) when long document prefixes
+(e.g., 32K–128K tokens) must survive host memory pressure or server restarts without
+re-running prefill.
+
+### Key arguments
+
+- [`--radix-cache`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--cache-ram`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--cache-disk`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--cache-disk-dir`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--checkpoint-mode`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--checkpoint-min-step`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--ctx-checkpoints`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+- [`--radix-eviction`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
+
+### Measurement and validation
+
+Monitor prefix hit rates via Prometheus metrics `beellama:radix_cache_hits_total`
+partitioned by storage tier (`vram`, `ram`, `disk`). Completion telemetry logs
+report `cache_lcp_n` and `cache_source` (naming the matched tier). Compare Time-To-First-Token
+(TTFT) on warm vs. cold prompts across iterations.
+
+### Known limitations
+
+Disk offload throughput depends on storage bus bandwidth (NVMe PCIe Gen4/Gen5 recommended).
+KVarN checkpoints maintain 128-token descriptor alignment; incomplete trailing tokens
+are staged in exact unquantized buffers until complete 128-token groups form.
+
 ## Removed systems
 
 TurboQuant/TCQ, DDTree, CopySpec, the fork DFlash ring/capture/tape and reduced
 verifier, the fringe controller, and their private arguments are not maintained
 in v0.4.0. See [Migration from earlier versions](beellama-args.md#migration-from-earlier-versions)
 for redirects and replacements.
+

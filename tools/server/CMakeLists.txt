@@ -25,6 +25,10 @@ add_library(${TARGET} STATIC
     server-mcp.h
     server-schema.cpp
     server-schema.h
+    server-radix-tree.cpp
+    server-radix-tree.h
+    server-tier-manager.cpp
+    server-tier-manager.h
 )
 
 if (BUILD_SHARED_LIBS)

@@ -16,6 +16,8 @@
 
 
 struct common_speculative;
+class server_radix_tree;
+class server_tier_manager;
 
 // A rollback-capable recurrent/compact KV implementation can truncate a
 // speculative suffix in-place up to its advertised reserve.  Beyond that
@@ -785,10 +787,13 @@ struct server_prompt_cache_state {
 };
 
 struct server_prompt_cache {
-    server_prompt_cache(int32_t limit_size_mib, size_t limit_tokens) {
-        this->limit_size   = 1024ull*1024ull*(limit_size_mib < 0 ? 0 : limit_size_mib);
-        this->limit_tokens = limit_tokens;
-    }
+    server_prompt_cache(
+            int32_t limit_size_mib,
+            size_t limit_tokens,
+            bool radix_enabled = true,
+            int32_t disk_quota_mib = 0,
+            const std::string & disk_dir = "");
+    ~server_prompt_cache();
 
     std::list<server_prompt_cache_state> states;
 
@@ -798,12 +803,20 @@ struct server_prompt_cache {
     // in tokens, 0 = no limit
     size_t limit_tokens = 0;
 
+    bool radix_enabled = true;
+    std::unique_ptr<server_radix_tree> radix_tree;
+    std::unique_ptr<server_tier_manager> tier_manager;
+
     uint64_t admission_attempts = 0;
     uint64_t admission_successes = 0;
     uint64_t admission_failures = 0;
     uint64_t restore_attempts = 0;
     uint64_t restore_successes = 0;
     uint64_t restore_failures = 0;
+
+    uint64_t radix_hits_vram = 0;
+    uint64_t radix_hits_ram  = 0;
+    uint64_t radix_hits_disk = 0;
 
     // Payload-only accounting: serialized target/draft/speculative bytes and
     // deduplicated shared checkpoint buffers. Container/token capacity and

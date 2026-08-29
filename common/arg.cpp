@@ -1473,6 +1473,27 @@ static void common_params_kvarn_normalize(common_params & params) {
     }
 }
 
+static void common_params_radix_normalize(common_params & params) {
+    if (params.radix_cache) {
+        if (!params.checkpoint_min_step_explicit) {
+            params.checkpoint_min_step = 0;
+        }
+    }
+    if (params.cache_disk_dir.empty()) {
+        const char * xdg_cache = getenv("XDG_CACHE_HOME");
+        if (xdg_cache && xdg_cache[0] != '\0') {
+            params.cache_disk_dir = std::string(xdg_cache) + "/beellama.cpp/radix";
+        } else {
+            const char * home = getenv("HOME");
+            if (home && home[0] != '\0') {
+                params.cache_disk_dir = std::string(home) + "/.cache/beellama.cpp/radix";
+            } else {
+                params.cache_disk_dir = "/tmp/beellama.cpp/radix";
+            }
+        }
+    }
+}
+
 static common_speculative_dm_controller common_speculative_dm_controller_from_name(const std::string & value) {
     if (value == "off") {
         return COMMON_SPECULATIVE_DM_CONTROLLER_OFF;
@@ -1502,7 +1523,6 @@ bool common_params_parse(int argc, char ** argv, common_params & params, llama_e
         argv = utf8.ptrs.data();
     }
 #endif
-
     auto ctx_arg = common_params_parser_init(params, ex, print_usage);
     const common_params params_org = ctx_arg.params; // the example can modify the default params
 
@@ -1524,6 +1544,7 @@ bool common_params_parse(int argc, char ** argv, common_params & params, llama_e
             exit(0);
         }
         common_params_kvarn_normalize(ctx_arg.params);
+        common_params_radix_normalize(ctx_arg.params);
         ctx_arg.params.lr.init();
         common_validate_reasoning_loop_guard_params(ctx_arg.params.reasoning_loop_guard);
         ctx_arg.params.sampling.reasoning_budget_tracking =
@@ -1923,6 +1944,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("checkpoint-min-step must be non-negative");
             }
             params.checkpoint_min_step = value;
+            params.checkpoint_min_step_explicit = true;
         }
     ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
@@ -1933,6 +1955,50 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cache_ram_mib = value;
         }
     ).set_env("LLAMA_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"-rxc", "--radix-cache"},
+        {"-no-rxc", "--no-radix-cache"},
+        "enable dynamic Radix tree prefix caching (default: enabled on server)",
+        [](common_params & params, bool value) {
+            params.radix_cache = value;
+            params.radix_cache_explicit = true;
+        }
+    ).set_env("LLAMA_ARG_RADIX_CACHE").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"-cdisk", "--cache-disk"}, "N",
+        string_format("maximum persistent NVMe/SSD disk quota in MiB (default: %d, -1 - unlimited, 0 - disable)", params.cache_disk_mib),
+        [](common_params & params, int value) {
+            params.cache_disk_mib = value;
+        }
+    ).set_env("LLAMA_ARG_CACHE_DISK").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--cache-disk-dir"}, "PATH",
+        "directory path for storing spilled Radix checkpoint chunks (default: ${XDG_CACHE_HOME:-~/.cache}/beellama.cpp/radix)",
+        [](common_params & params, const std::string & value) {
+            params.cache_disk_dir = value;
+        }
+    ).set_env("LLAMA_ARG_CACHE_DISK_DIR").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"-cm", "--checkpoint-mode"}, "MODE",
+        string_format("checkpoint trigger policy: step, turn, both, off (default: %s)", params.checkpoint_mode.c_str()),
+        [](common_params & params, const std::string & value) {
+            if (value != "step" && value != "turn" && value != "both" && value != "off") {
+                throw std::invalid_argument("checkpoint-mode must be one of: step, turn, both, off");
+            }
+            params.checkpoint_mode = value;
+            params.checkpoint_mode_explicit = true;
+        }
+    ).set_env("LLAMA_ARG_CHECKPOINT_MODE").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--radix-eviction"}, "POLICY",
+        string_format("eviction strategy when quotas are reached: lru, lfu, cost (default: %s)", params.radix_eviction.c_str()),
+        [](common_params & params, const std::string & value) {
+            if (value != "lru" && value != "lfu" && value != "cost") {
+                throw std::invalid_argument("radix-eviction must be one of: lru, lfu, cost");
+            }
+            params.radix_eviction = value;
+        }
+    ).set_env("LLAMA_ARG_RADIX_EVICTION").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
