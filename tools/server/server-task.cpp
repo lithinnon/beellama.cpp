@@ -2252,7 +2252,7 @@ bool server_prompt_cache::load(
 }
 
 void server_prompt_cache::update() {
-    if (limit_size > 0) {
+    if (limit_size != (size_t) -1) {
         while (!states.empty() && accounted_size() > limit_size) {
             SRV_WRN(" - cache accounted-payload limit reached, removing oldest entry (size = %.3f MiB)\n", states.front().accounted_size() / (1024.0 * 1024.0));
 
