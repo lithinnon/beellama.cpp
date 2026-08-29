@@ -328,13 +328,17 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
         }
 
         auto & oldest = disk_nodes.front();
-        SRV_TRC("pruning oldest disk chunk for node %lu to satisfy disk quota\n", (unsigned long)oldest->id);
+        SRV_INF("pruning oldest disk chunk '%s' (node %lu) to satisfy disk quota\n",
+                oldest->disk_chunk_id.c_str(), (unsigned long)oldest->id);
 
-        if (!oldest->disk_chunk_id.empty() && fs::exists(oldest->disk_chunk_id)) {
-            try {
-                fs::remove(oldest->disk_chunk_id);
-            } catch (const std::exception & e) {
-                SRV_WRN("failed to remove disk chunk %s: %s\n", oldest->disk_chunk_id.c_str(), e.what());
+        if (!oldest->disk_chunk_id.empty()) {
+            std::error_code ec;
+            bool removed = fs::remove(oldest->disk_chunk_id, ec);
+            if (!removed || ec) {
+                SRV_WRN("failed to remove disk chunk '%s': %s (code=%d)\n",
+                        oldest->disk_chunk_id.c_str(), ec.message().c_str(), ec.value());
+            } else {
+                SRV_INF("successfully removed disk chunk '%s'\n", oldest->disk_chunk_id.c_str());
             }
         }
 
