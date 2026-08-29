@@ -5753,17 +5753,11 @@ static bool ggml_backend_cuda_kvarn_tail_attention_supported(
     if (!ggml_backend_cuda_kvarn_native_ops(dev)) {
         return false;
     }
-#if defined(GGML_USE_HIP)
     const int device = ((ggml_backend_cuda_device_context *) dev->context)->device;
     const auto capabilities = ggml_cuda_fattn_kvarn_device_capabilities(device);
     return ggml_cuda_fattn_kvarn_body_shape_supported(capabilities, d_k, d_v) &&
-        body_k == GGML_TYPE_F16 && body_v == GGML_TYPE_F16 &&
         (tail_k == GGML_TYPE_F16 || tail_k == GGML_TYPE_BF16) &&
         (tail_v == GGML_TYPE_F16 || tail_v == GGML_TYPE_BF16);
-#else
-    return ggml_cuda_flash_attn_ext_tail_supported(
-        body_k, body_v, tail_k, tail_v, d_k, d_v);
-#endif
 }
 
 static bool ggml_backend_cuda_kv_tail_segmented_attention_supported(
@@ -5773,18 +5767,8 @@ static bool ggml_backend_cuda_kv_tail_segmented_attention_supported(
         ggml_type tail_v,
         int64_t d_k,
         int64_t d_v) {
-#if defined(GGML_USE_HIP)
-    GGML_UNUSED(body_k);
-    GGML_UNUSED(body_v);
-    GGML_UNUSED(tail_k);
-    GGML_UNUSED(tail_v);
-    GGML_UNUSED(d_k);
-    GGML_UNUSED(d_v);
-    return false;
-#else
     return ggml_cuda_flash_attn_ext_tail_supported(
             body_k, body_v, tail_k, tail_v, d_k, d_v);
-#endif
 }
 
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
