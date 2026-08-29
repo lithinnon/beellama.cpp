@@ -367,7 +367,7 @@ void server_tier_manager::enforce_disk_limit(server_radix_tree & tree) {
 
     // 2. Enforce global shared disk quota across all model subdirectories in root cache dir
     std::string root_scan_dir = fs::path(disk_dir).parent_path().string();
-    if (root_scan_dir.empty() || !fs::exists(root_scan_dir) || fs::path(root_scan_dir).filename() != "radix") {
+    if (root_scan_dir.empty() || !fs::exists(root_scan_dir)) {
         root_scan_dir = disk_dir;
     }
 
