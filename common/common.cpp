@@ -2503,7 +2503,7 @@ common_prompt_checkpoint_result common_prompt_checkpoint::update_dft(
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
     if (ckpt_size == 0) {
-        return { COMMON_PROMPT_CHECKPOINT_UNSUPPORTED, 0 };
+        return { COMMON_PROMPT_CHECKPOINT_SKIPPED, 0 };
     }
 
     try {

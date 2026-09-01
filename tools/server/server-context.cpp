@@ -2792,12 +2792,16 @@ private:
             bool restore_target,
             bool restore_draft,
             bool restore_speculative) {
+        const bool do_restore_target = restore_target && target != nullptr && !checkpoint.data_tgt.empty();
+        const bool do_restore_draft  = restore_draft && draft != nullptr && !checkpoint.data_dft.empty();
+        const bool do_restore_spec   = restore_speculative && spec != nullptr && !checkpoint.data_spec.empty();
+
         const auto result = server_prompt_restore_transaction_diagnostic(
                 target, draft, spec.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY,
                 { checkpoint.data_tgt.data(), checkpoint.data_tgt.size() },
                 { checkpoint.data_dft.data(), checkpoint.data_dft.size() },
                 { checkpoint.data_spec.data(), checkpoint.data_spec.size() },
-                restore_target, restore_draft, restore_speculative);
+                do_restore_target, do_restore_draft, do_restore_spec);
         if (!result.success) {
             const char * component = !result.has_component ? "none" :
                     result.component == SERVER_PROMPT_STATE_MAIN ? "target" :
@@ -3925,10 +3929,14 @@ private:
                                         bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                         if (!do_reset) {
+                                            const bool has_dft_data = ctx_dft != nullptr && !it->data_dft.empty();
                                             do_reset = !restore_checkpoint_transaction(
                                                     slot, *it, ctx_tgt, ctx_dft,
-                                                    true, ctx_dft != nullptr, true);
+                                                    true, has_dft_data, true);
                                             if (!do_reset) {
+                                                if (ctx_dft != nullptr && !has_dft_data) {
+                                                    llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, 0, -1);
+                                                }
                                                 pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                                 n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
                                                 const bool restored_from_ram = slot.prompt_cache_source == "ram";
@@ -3944,6 +3952,7 @@ private:
                                                     prompt_reuse_alignment() > 1 && pos_next > 0;
                                             SLT_TRC(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
                                                     "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+                                            slot.mem.seq_rm(slot.id, 0, -1);
                                             pos_next = 0;
                                             n_past = 0;
                                             slot.prompt_cache_source = "none";
@@ -4008,17 +4017,20 @@ private:
                                 ? slot.prompt.tokens.pos_next(slot.prompt.tokens.size_up_to_pos(value))
                                 : value;
                     };
-                    const auto seq_rm_result = slot.mem.seq_rm_suffix(
-                            slot.id, p0, normalize_p0, planned_p0);
+                    common_memory_seq_rm_result seq_rm_result = COMMON_MEMORY_SEQ_RM_APPLIED;
+                    if (slot.prompt_cache_source != "checkpoint" && slot.prompt_cache_source != "ram") {
+                        seq_rm_result = slot.mem.seq_rm_suffix(
+                                slot.id, p0, normalize_p0, planned_p0);
+                    }
                     if (seq_rm_result == COMMON_MEMORY_SEQ_RM_MUTATION_FAILED) {
-                        slot.prompt_reset_after_memory_clear();
+                        slot.prompt_clear();
                         send_error(slot, "internal prompt-cache rollback failure", ERROR_TYPE_SERVER);
                         slot.release();
                         return;
                     }
                     if (seq_rm_result == COMMON_MEMORY_SEQ_RM_FULL_REPROCESS) {
                         const int32_t lexical_lcp = slot.n_prompt_tokens_lcp;
-                        slot.prompt_reset_after_memory_clear();
+                        slot.prompt_clear();
                         slot.n_prompt_tokens_lcp = lexical_lcp;
                         slot.prompt_cache_reason = "suffix_removal_requires_reprocess";
                         if (!prompt_just_started) {
@@ -4238,11 +4250,18 @@ private:
                     do_checkpoint = do_checkpoint && !has_mtmd;
                     do_checkpoint = do_checkpoint && n_tokens_cur > 0;
 
-                    // no need to create checkpoints that are too close together, unless it's the last user message
-                    do_checkpoint = do_checkpoint && (
-                            slot.prompt.checkpoints.empty() ||
-                            is_last_user_message || near_prompt_end ||
-                            n_tokens_start > slot.prompt.checkpoints.back().n_tokens + checkpoint_min_step);
+                    // for Radix Cache, checkpointing is strictly boundary-driven (turn/message spans, prompt completion)
+                    if (prompt_cache) {
+                        do_checkpoint = do_checkpoint && (
+                                slot.prompt.checkpoints.empty() ||
+                                is_last_user_message || near_prompt_end);
+                    } else {
+                        // legacy flat slot spacing
+                        do_checkpoint = do_checkpoint && (
+                                slot.prompt.checkpoints.empty() ||
+                                is_last_user_message || near_prompt_end ||
+                                n_tokens_start > slot.prompt.checkpoints.back().n_tokens + checkpoint_min_step);
+                    }
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
@@ -4540,7 +4559,7 @@ private:
                 send_final_response(slot);
                 metrics_on_prediction(slot);
 
-                if (prompt_cache && (params_base.checkpoint_mode == "turn" || params_base.checkpoint_mode == "both")) {
+                if (prompt_cache) {
                     slot.prompt_save(*prompt_cache);
                     prompt_cache->update();
                 }
@@ -4718,7 +4737,7 @@ private:
                     send_final_response(slot);
                     metrics_on_prediction(slot);
 
-                    if (prompt_cache && (params_base.checkpoint_mode == "turn" || params_base.checkpoint_mode == "both")) {
+                    if (prompt_cache) {
                         slot.prompt_save(*prompt_cache);
                         prompt_cache->update();
                     }
