@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <filesystem>
 #include <queue>
+
+namespace fs = std::filesystem;
 
 static int64_t get_monotonic_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -117,10 +120,9 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
 
     // If destination node already had a disk chunk from an older checkpoint, remove the orphaned file
     if (!curr->disk_chunk_id.empty()) {
-        if (std::filesystem::exists(curr->disk_chunk_id)) {
-            try {
-                std::filesystem::remove(curr->disk_chunk_id);
-            } catch (...) {}
+        std::error_code ec;
+        if (fs::exists(curr->disk_chunk_id, ec)) {
+            fs::remove(curr->disk_chunk_id, ec);
         }
         curr->disk_chunk_id.clear();
     }
