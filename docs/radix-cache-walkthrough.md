@@ -111,19 +111,15 @@ BeeLlama's KVarN target KV-cache compression groups attention state into 128-tok
 
 ---
 
-## 5. Checkpoint Strategies & Modes
+## 5. Boundary-Driven Checkpointing & $1\text{ Node} = 1\text{ State}$ Normalization
 
-RXC provides granular control over when KV-cache states are snapshotted:
+RXC operates on a lean **boundary-driven checkpointing** policy to maximize prefix reuse while eliminating storage bloat:
 
-| Mode (`-cm`, `--checkpoint-mode`) | Description | Best For |
-|---|---|---|
-| `turn` | Snapshots state only when a generation turn completes. **Zero overhead during prefill/streaming.** | Interactive chat, coding assistants, multi-turn agents. |
-| `step` | Snapshots state at fixed token intervals during prefill (`-cms`, `--checkpoint-min-step`). | Extremely long document ingestion (32K+ tokens). |
-| `both` | Combines turn-end checkpoints with intermediate step checkpoints. | Long document ingestion followed by multi-turn Q&A. |
-| `off` | Disables dynamic state snapshotting. | Stateless single-turn batch benchmarks. |
+1. **System & Turn Boundaries:** KV-cache state snapshots are automatically captured upon generation turn completion and prompt completion boundaries. **Zero prefill interrupt latency.**
+2. **Single Canonical State per Node:** When inserting into the Radix Tree, intermediate ancestral checkpoint lists are pruned so each node holds exactly $1$ canonical checkpoint ($1\text{ Node} = 1\text{ State}$), reducing checkpoint storage by over $6\times$.
 
 > [!TIP]
-> **Turn Checkpointing Advantage:** When using `-cm turn`, prefill and generation operate at 100% full hardware speed without intermediate `llama_state_seq_get_data` interrupts. The snapshot is saved asynchronously upon generation completion.
+> **Turn Checkpointing Advantage:** Prefill and generation operate at 100% full hardware speed without intermediate intra-prompt interrupts. The snapshot is saved cleanly upon generation completion.
 
 ---
 
@@ -143,15 +139,7 @@ To guarantee zero cache corruption across server crashes or power failures:
 
 ---
 
-## 7. Multimodal & M-RoPE Support
-
-RXC natively tracks multimodal media chunks (images, audio) and M-RoPE 2D/3D positional metadata within token sequences:
-- Media chunks are identified by `LLAMA_TOKEN_NULL` token placeholders linked to their underlying high-dimensional feature embeddings.
-- Prefix matching preserves media boundaries, ensuring that partial image embeddings are never split across checkpoint edges.
-
----
-
-## 8. CLI Flags & Environment Variables
+## 7. CLI Flags & Environment Variables
 
 | Short | Long Flag | Environment Variable | Default | Description |
 |---|---|---|---|---|
@@ -160,8 +148,6 @@ RXC natively tracks multimodal media chunks (images, audio) and M-RoPE 2D/3D pos
 | `-cram` | `--cache-ram N` | `LLAMA_ARG_CACHE_RAM` | `8192` | Host RAM quota in MiB (`-1` = unlimited, `0` = direct NVMe spill). |
 | `-cdisk`| `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | Global NVMe SSD quota in MiB (`-1` = unlimited, `0` = disabled). |
 | — | `--cache-disk-dir PATH`| `LLAMA_ARG_CACHE_DISK_DIR` | `~/.cache/beellama.cpp/radix` | Root directory path for disk `.ckpt` files. |
-| `-cm` | `--checkpoint-mode MODE`| `LLAMA_ARG_CHECKPOINT_MODE`| `turn` (with radix) | Trigger policy: `turn`, `step`, `both`, or `off`. |
-| `-cms` | `--checkpoint-min-step N`| `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT`| `0` (with radix) | Intra-prompt checkpoint token interval. |
 | `-ctxcp`| `--ctx-checkpoints N`| `LLAMA_ARG_CTX_CHECKPOINTS` | `32` | Max checkpoints retained along a single branch. |
 | — | `--radix-eviction POLICY`| `LLAMA_ARG_RADIX_EVICTION` | `lru` | Eviction strategy: `lru`, `lfu`, or `cost`. |
 
