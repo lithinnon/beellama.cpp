@@ -1,6 +1,7 @@
 #include "../tools/server/server-radix-tree.h"
 #include "../tools/server/server-tier-manager.h"
 #include "../tools/server/server-task.h"
+#include "../tools/mtmd/mtmd.h"
 
 #undef NDEBUG
 #include <cassert>
@@ -406,6 +407,32 @@ static void test_multimodel_cache_isolation_and_quotas() {
     std::filesystem::remove_all(fs::path(base_dir).parent_path());
 }
 
+
+static void test_radix_tree_single_checkpoint_normalization() {
+    server_radix_tree tree;
+
+    server_prompt p;
+    p.tokens = server_tokens(llama_tokens{1, 2, 3, 4, 5, 6, 7, 8}, false);
+
+    // Simulate upstream legacy array with 4 intermediate checkpoints
+    for (int i = 1; i <= 4; ++i) {
+        common_prompt_checkpoint ckpt;
+        ckpt.n_tokens = i * 2;
+        ckpt.pos_min = 0;
+        ckpt.pos_max = i * 2 - 1;
+        p.checkpoints.push_back(ckpt);
+    }
+    assert(p.checkpoints.size() == 4);
+
+    auto d = make_test_data(128);
+    auto node = tree.insert(p, std::move(d));
+    assert(node != nullptr);
+
+    // Verify 1-Node = 1-State normalization: only the terminal checkpoint is preserved
+    assert(node->prompt.checkpoints.size() == 1);
+    assert(node->prompt.checkpoints.front().n_tokens == 8);
+}
+
 int main() {
     std::cout << "[test-radix-tree] Running tests...\n";
 
@@ -435,6 +462,9 @@ int main() {
 
     test_multimodel_cache_isolation_and_quotas();
     std::cout << " - test_multimodel_cache_isolation_and_quotas: PASSED\n";
+
+    test_radix_tree_single_checkpoint_normalization();
+    std::cout << " - test_radix_tree_single_checkpoint_normalization: PASSED\n";
 
     std::cout << "[test-radix-tree] All Radix Cache tests passed successfully!\n";
     return 0;

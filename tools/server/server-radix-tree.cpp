@@ -41,7 +41,7 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
         return nullptr;
     }
 
-    const llama_tokens & full_tokens = prompt.tokens.get_tokens();
+    const auto & full_tokens = prompt.tokens;
     std::shared_ptr<server_radix_node> curr = root;
     size_t token_idx = 0;
 
@@ -96,7 +96,11 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
 
         if (!edge_found) {
             // Create a new branch
-            std::vector<llama_token> new_tokens(full_tokens.begin() + token_idx, full_tokens.end());
+            std::vector<llama_token> new_tokens;
+            new_tokens.reserve(full_tokens.size() - token_idx);
+            for (size_t k = token_idx; k < full_tokens.size(); ++k) {
+                new_tokens.push_back(full_tokens[k]);
+            }
             auto new_node = std::make_shared<server_radix_node>();
             new_node->id = next_node_id++;
             new_node->token_depth = full_tokens.size();
@@ -123,6 +127,11 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
 
     // Set state on destination node
     curr->prompt = prompt.clone();
+    if (!curr->prompt.checkpoints.empty()) {
+        auto last_ckpt = std::move(curr->prompt.checkpoints.back());
+        curr->prompt.checkpoints.clear();
+        curr->prompt.checkpoints.push_back(std::move(last_ckpt));
+    }
     curr->data = std::move(data);
     curr->tier = RADIX_TIER_RAM;
     curr->is_checkpoint = true;
@@ -147,7 +156,7 @@ server_radix_match_result server_radix_tree::find_best_match(
     }
 
     const int32_t align = std::max(1, alignment);
-    const llama_tokens & req_tokens = requested.get_tokens();
+    const auto & req_tokens = requested;
 
     std::shared_ptr<server_radix_node> curr = root;
     size_t token_idx = 0;
