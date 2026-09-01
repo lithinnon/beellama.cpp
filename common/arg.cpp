@@ -1979,17 +1979,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_DISK_DIR").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
-        {"-cm", "--checkpoint-mode"}, "MODE",
-        string_format("checkpoint trigger policy: step, turn, both, off (default: %s)", params.checkpoint_mode.c_str()),
-        [](common_params & params, const std::string & value) {
-            if (value != "step" && value != "turn" && value != "both" && value != "off") {
-                throw std::invalid_argument("checkpoint-mode must be one of: step, turn, both, off");
-            }
-            params.checkpoint_mode = value;
-            params.checkpoint_mode_explicit = true;
-        }
-    ).set_env("LLAMA_ARG_CHECKPOINT_MODE").set_examples({LLAMA_EXAMPLE_SERVER}));
-    add_opt(common_arg(
         {"--radix-eviction"}, "POLICY",
         string_format("eviction strategy when quotas are reached: lru, lfu, cost (default: %s)", params.radix_eviction.c_str()),
         [](common_params & params, const std::string & value) {

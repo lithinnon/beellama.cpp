@@ -685,9 +685,10 @@ automatically matching, branching, and reusing KV cache prefixes for multi-turn
 conversations, few-shot prompts, and document analysis.
 
 Durable Radix node checkpoints preserve KVarN 128-token descriptor alignment
-(`KVAR_N_GROUP = 128`) and F16/BF16 KV Cache Precision Tails. For Sliding Window
-Attention (SWA) and recurrent architectures, state snapshots are captured at
-turn boundaries and step milestones.
+(`KVAR_N_GROUP = 128`) and F16/BF16 KV Cache Precision Tails. Checkpointing is
+strictly boundary-driven (system prompts and conversation turn ends),
+normalizing each Radix node to a single compact canonical checkpoint ($1\text{ Node} = 1\text{ State}$)
+and eliminating redundant intra-turn snapshot bloat.
 
 ### When to use it
 
@@ -703,9 +704,6 @@ re-running prefill.
 - [`--cache-ram`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
 - [`--cache-disk`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
 - [`--cache-disk-dir`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
-- [`--checkpoint-mode`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
-- [`--checkpoint-min-step`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
-- [`--ctx-checkpoints`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
 - [`--radix-eviction`](beellama-args.md#radix-cache-rxc-and-hierarchical-caching)
 
 ### Measurement and validation

@@ -706,8 +706,6 @@ struct common_params {
     bool        radix_cache_explicit   = false;
     int32_t     cache_disk_mib         = 0;     // -1 = unlimited, 0 = disable, N = MiB
     std::string cache_disk_dir         = "";    // defaults to XDG_CACHE_HOME/beellama.cpp/radix
-    std::string checkpoint_mode        = "step"; // "step", "turn", "both", "off"
-    bool        checkpoint_mode_explicit = false;
     bool        checkpoint_min_step_explicit = false;
     std::string radix_eviction         = "lru"; // "lru", "lfu", "cost"
 

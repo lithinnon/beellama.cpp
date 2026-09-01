@@ -824,14 +824,12 @@ static void test(void) {
         "-rxc",
         "-cdisk", "16384",
         "--cache-disk-dir", "/tmp/test_rxc_disk",
-        "-cm", "turn",
         "--radix-eviction", "cost"
     };
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
     assert(params.radix_cache == true);
     assert(params.cache_disk_mib == 16384);
     assert(params.cache_disk_dir == "/tmp/test_rxc_disk");
-    assert(params.checkpoint_mode == "turn");
     assert(params.radix_eviction == "cost");
 
     // test -no-rxc and unlimited disk
@@ -839,13 +837,11 @@ static void test(void) {
     argv = {
         "binary_name",
         "-no-rxc",
-        "-cdisk", "-1",
-        "-cm", "both"
+        "-cdisk", "-1"
     };
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
     assert(params.radix_cache == false);
     assert(params.cache_disk_mib == -1);
-    assert(params.checkpoint_mode == "both");
 
 // skip this part on windows, because setenv is not supported
 #ifdef _WIN32
