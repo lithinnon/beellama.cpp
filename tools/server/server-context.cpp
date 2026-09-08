@@ -3996,6 +3996,7 @@ private:
 
                                         bool do_reset = it == slot.prompt.checkpoints.rend();
 
+                                        if (!do_reset) {
                                             const bool has_dft_data = slot.draft_owns_state && ctx_dft != nullptr && !it->data_dft.empty();
                                             do_reset = !restore_checkpoint_transaction(
                                                     slot, *it, ctx_tgt, slot.draft_owns_state ? ctx_dft : nullptr,

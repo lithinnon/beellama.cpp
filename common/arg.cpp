@@ -1544,7 +1544,6 @@ static void common_params_radix_normalize(common_params & params) {
             }
         }
     }
->>>>>>> 822ffcd26 (server: implement hierarchical radix cache (RXC) with 3-tier storage)
 }
 
 static common_speculative_dm_controller common_speculative_dm_controller_from_name(const std::string & value) {
