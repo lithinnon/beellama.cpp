@@ -552,5 +552,33 @@ int main() {
         assert(cache.accounted_size() == 230*KIB);
     }
 
+    {
+        // Regression test: A checkpoint whose payload was cleared (e.g. on slot release)
+        // must never be planned as restorable, and must reject restoration if requested.
+        server_prompt prompt = make_prompt({1, 2, 3, 4});
+        auto & ckpt = prompt.checkpoints.emplace_back();
+        ckpt.n_tokens = 3;
+        ckpt.pos_min = 0;
+        ckpt.pos_max = 3;
+        // ckpt.data_tgt is deliberately empty (zombie checkpoint)
+
+        server_tokens requested(llama_tokens {1, 2, 3, 5}, false);
+        const auto plan = server_prompt_plan_reuse(prompt, requested, 1, 0, false);
+        assert(plan.restorable_tokens == 0);
+        assert(plan.reason != SERVER_PROMPT_REUSE_CHECKPOINT);
+
+        server_prompt_restore_transaction_io tx {
+            /*.restore_target =*/ true,
+            /*.restore_draft =*/ false,
+            /*.restore_speculative =*/ false,
+            /*.prepare =*/ [](server_prompt_state_kind, server_prompt_state_view) { return true; },
+            /*.commit =*/ [](server_prompt_state_kind) {},
+        };
+        const auto res = server_prompt_restore_transaction_diagnostic(
+                { ckpt.data_tgt.data(), ckpt.data_tgt.size() }, {}, {}, tx);
+        assert(!res.success);
+        assert(res.reason == SERVER_PROMPT_RESTORE_MISSING_REQUIRED_STATE);
+    }
+
     return 0;
 }

@@ -14,7 +14,10 @@ public:
     ~server_tier_manager() = default;
 
     // Initialize the disk tier with base directory and quota
-    bool init(const std::string & base_dir, int32_t quota_mib);
+    bool init(const std::string & base_dir, int32_t quota_mib, server_radix_tree * tree = nullptr);
+
+    // Hydrate existing on-disk .ckpt chunks into the Radix Tree at boot
+    bool hydrate_from_disk(server_radix_tree & tree);
 
     // Save a node's in-memory state to an on-disk .ckpt chunk atomically
     bool save_to_disk(const std::shared_ptr<server_radix_node> & node, server_radix_tree & tree);

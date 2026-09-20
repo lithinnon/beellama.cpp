@@ -143,6 +143,120 @@ std::shared_ptr<server_radix_node> server_radix_tree::insert(
     return curr;
 }
 
+std::shared_ptr<server_radix_node> server_radix_tree::insert_disk_node(
+        server_prompt && prompt,
+        std::string disk_chunk_id,
+        size_t payload_bytes,
+        int64_t last_accessed_time,
+        uint64_t node_id) {
+    if (prompt.tokens.size() == 0) {
+        return nullptr;
+    }
+
+    if (node_id > 0 && node_id >= next_node_id) {
+        next_node_id = node_id + 1;
+    }
+
+    const auto & full_tokens = prompt.tokens;
+    std::shared_ptr<server_radix_node> curr = root;
+    size_t token_idx = 0;
+
+    while (token_idx < full_tokens.size()) {
+        const llama_token next_token = full_tokens[token_idx];
+        bool edge_found = false;
+
+        for (size_t i = 0; i < curr->children.size(); ++i) {
+            auto & edge = curr->children[i];
+            if (!edge.tokens.empty() && edge.tokens[0] == next_token) {
+                edge_found = true;
+
+                // Compute length of common prefix between edge and remaining tokens
+                size_t match_len = 0;
+                while (match_len < edge.tokens.size() &&
+                       token_idx + match_len < full_tokens.size() &&
+                       edge.tokens[match_len] == full_tokens[token_idx + match_len]) {
+                    ++match_len;
+                }
+
+                if (match_len < edge.tokens.size()) {
+                    // Split the edge
+                    auto split_node = std::make_shared<server_radix_node>();
+                    split_node->id = next_node_id++;
+                    split_node->token_depth = curr->token_depth + match_len;
+                    split_node->tier = RADIX_TIER_NONE;
+                    split_node->parent = curr;
+                    split_node->last_accessed_time = last_accessed_time;
+
+                    // Edge to old child with remaining suffix
+                    std::vector<llama_token> old_child_tokens(
+                            edge.tokens.begin() + match_len, edge.tokens.end());
+                    auto old_child = edge.child;
+                    old_child->parent = split_node;
+
+                    split_node->children.push_back({ std::move(old_child_tokens), old_child });
+
+                    // Update current edge to point to split_node
+                    edge.tokens.resize(match_len);
+                    edge.child = split_node;
+
+                    curr = split_node;
+                    token_idx += match_len;
+                } else {
+                    // Edge fully matched
+                    curr = edge.child;
+                    token_idx += match_len;
+                }
+                break;
+            }
+        }
+
+        if (!edge_found) {
+            // Create a new branch
+            std::vector<llama_token> new_tokens;
+            new_tokens.reserve(full_tokens.size() - token_idx);
+            for (size_t k = token_idx; k < full_tokens.size(); ++k) {
+                new_tokens.push_back(full_tokens[k]);
+            }
+            auto new_node = std::make_shared<server_radix_node>();
+            new_node->id = (node_id > 0 && curr == root && token_idx == 0) ? node_id : next_node_id++;
+            new_node->token_depth = full_tokens.size();
+            new_node->tier = RADIX_TIER_NONE;
+            new_node->parent = curr;
+            new_node->last_accessed_time = last_accessed_time;
+
+            curr->children.push_back({ std::move(new_tokens), new_node });
+            curr = new_node;
+            token_idx = full_tokens.size();
+            break;
+        }
+    }
+
+    // Deduplicate if destination node already had a disk chunk from an identical prompt prefix
+    if (!curr->disk_chunk_id.empty() && curr->disk_chunk_id != disk_chunk_id) {
+        if (last_accessed_time >= curr->last_accessed_time) {
+            std::error_code ec;
+            fs::remove(curr->disk_chunk_id, ec);
+            curr->disk_chunk_id = std::move(disk_chunk_id);
+            curr->last_accessed_time = last_accessed_time;
+            curr->payload_bytes = payload_bytes;
+        } else {
+            std::error_code ec;
+            fs::remove(disk_chunk_id, ec);
+        }
+        return curr;
+    }
+
+    curr->prompt = std::move(prompt);
+    curr->tier = RADIX_TIER_DISK;
+    curr->is_checkpoint = true;
+    curr->disk_chunk_id = std::move(disk_chunk_id);
+    curr->payload_bytes = payload_bytes;
+    curr->last_accessed_time = last_accessed_time;
+    curr->access_count = 1;
+
+    return curr;
+}
+
 server_radix_match_result server_radix_tree::find_best_match(
         const server_tokens & requested,
         int32_t alignment,

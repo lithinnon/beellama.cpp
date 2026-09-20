@@ -317,6 +317,7 @@ struct server_slot {
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_lcp       = 0;
     int32_t n_prompt_tokens_planned   = 0;
+    int32_t n_prompt_tokens_saved     = 0;
     std::string prompt_cache_source   = "none";
     std::string prompt_cache_reason   = "none";
 
@@ -357,6 +358,7 @@ struct server_slot {
         n_prompt_tokens_cache = 0;
         n_prompt_tokens_lcp = 0;
         n_prompt_tokens_planned = 0;
+        n_prompt_tokens_saved = 0;
         prompt_cache_source = "none";
         prompt_cache_reason = "memory_cleared";
         spec_ckpt.clear();
@@ -426,6 +428,10 @@ struct server_slot {
             }
         }
 
+        if (res) {
+            n_prompt_tokens_saved = prompt.tokens.size();
+        }
+
         return res;
     }
 
@@ -479,6 +485,7 @@ struct server_slot {
         n_prompt_tokens_cache = 0;
         n_prompt_tokens_lcp = 0;
         n_prompt_tokens_planned = 0;
+        n_prompt_tokens_saved = 0;
         prompt_cache_source = "none";
         prompt_cache_reason = "none";
         last_nl_pos    = 0;
@@ -686,12 +693,7 @@ struct server_slot {
             if (task->is_child()) {
                 prompt_clear();
             } else {
-                for (auto & ckpt : prompt.checkpoints) {
-                    ckpt.data_tgt.clear();
-                    ckpt.data_dft.clear();
-                    ckpt.data_spec.clear();
-                    ckpt.data_spec.shrink_to_fit();
-                }
+                prompt.checkpoints.clear();
             }
 
             callback_on_reset(*this);
@@ -877,6 +879,7 @@ struct server_slot {
         other.n_prompt_tokens_cache     = n_prompt_tokens_cache;
         other.n_prompt_tokens_lcp       = n_prompt_tokens_lcp;
         other.n_prompt_tokens_planned   = n_prompt_tokens_planned;
+        other.n_prompt_tokens_saved     = n_prompt_tokens_saved;
         other.prompt_cache_source       = prompt_cache_source;
         other.prompt_cache_reason       = prompt_cache_reason;
         other.stats = stats;
@@ -2830,9 +2833,9 @@ private:
             bool restore_target,
             bool restore_draft,
             bool restore_speculative) {
-        const bool do_restore_target = restore_target && target != nullptr && !checkpoint.data_tgt.empty();
-        const bool do_restore_draft  = restore_draft && draft != nullptr && !checkpoint.data_dft.empty();
-        const bool do_restore_spec   = restore_speculative && spec != nullptr && !checkpoint.data_spec.empty();
+        const bool do_restore_target = restore_target && target != nullptr;
+        const bool do_restore_draft  = restore_draft && draft != nullptr;
+        const bool do_restore_spec   = restore_speculative && spec != nullptr;
 
         const auto result = server_prompt_restore_transaction_diagnostic(
                 target, draft, spec.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY,
@@ -3989,7 +3992,8 @@ private:
                                                 if (cur.pos_max > pos_next) {
                                                     return false;
                                                 }
-                                                return prompt_reuse_boundary_is_stable(cur.n_tokens) &&
+                                                return !cur.data_tgt.empty() &&
+                                                        prompt_reuse_boundary_is_stable(cur.n_tokens) &&
                                                         (cur.pos_min < pos_min_thold || cur.pos_min == 0);
                                             }
                                         );
@@ -4101,10 +4105,8 @@ private:
                         slot.prompt_clear();
                         slot.n_prompt_tokens_lcp = lexical_lcp;
                         slot.prompt_cache_reason = "suffix_removal_requires_reprocess";
-                        if (!prompt_just_started) {
-                            slot.state = SLOT_STATE_STARTED;
-                            return;
-                        }
+                        slot.state = SLOT_STATE_STARTED;
+                        return;
                     } else if (prompt_just_started) {
                         const size_t planned_n_past = slot.prompt.tokens.size_up_to_pos(planned_p0);
                         if (int32_t(planned_n_past) < slot.n_prompt_tokens_cache) {
@@ -4241,11 +4243,11 @@ private:
                         slot.prompt.tokens.push_back(cur_tok);
 
                         // break at the last user message, or at user messages at least min step past the last checkpoint
-                        if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
+                        if (spans.is_user_start(slot.prompt.n_tokens())) {
                             const auto pos = slot.prompt.n_tokens();
                             const auto & checkpoints = slot.prompt.checkpoints;
 
-                            if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + checkpoint_min_step) {
+                            if (prompt_cache || pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + checkpoint_min_step) {
                                 break;
                             }
                         }
@@ -4540,6 +4542,18 @@ private:
                 }
             }
 
+            // Save intermediate prefix at message boundaries (e.g. system prompt)
+            if (slot.state == SLOT_STATE_PROCESSING_PROMPT && prompt_cache &&
+                    slot.task->params.cache_prompt &&
+                    off + n_batch_tokens == batch.size() &&
+                    slot.prompt.n_tokens() > slot.n_prompt_tokens_saved &&
+                    slot.task->params.message_spans.is_user_start(slot.prompt.n_tokens())) {
+                if (slot.prompt_save(*prompt_cache)) {
+                    slot.n_prompt_tokens_saved = slot.prompt.n_tokens();
+                }
+                prompt_cache->update();
+            }
+
             if (!is_inside_view(slot.i_batch)) {
                 // the required token not in this sub-batch, skip
                 return;
@@ -4562,6 +4576,18 @@ private:
                 }
 
                 GGML_ASSERT(slot.task->need_sampling());
+
+                // Save completed prompt to prompt_cache before token generation begins.
+                // This guarantees that any subsequent request matching this prompt
+                // (or extending it) finds a self-contained Radix node.
+                if (prompt_cache && slot.task->params.cache_prompt) {
+                    if (slot.prompt.n_tokens() > slot.n_prompt_tokens_saved) {
+                        if (slot.prompt_save(*prompt_cache)) {
+                            slot.n_prompt_tokens_saved = slot.prompt.n_tokens();
+                        }
+                        prompt_cache->update();
+                    }
+                }
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;

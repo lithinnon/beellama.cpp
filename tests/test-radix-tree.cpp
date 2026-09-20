@@ -433,6 +433,90 @@ static void test_radix_tree_single_checkpoint_normalization() {
     assert(node->prompt.checkpoints.front().n_tokens == 8);
 }
 
+static void test_radix_cache_persistence_across_restart() {
+    const std::string test_dir = "/tmp/beellama_radix_persist_test_" +
+                                 std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+
+    server_prompt_data original_d1 = make_test_data(512, 128);
+    server_prompt_data original_d2 = make_test_data(1024, 256);
+
+    // 1. Session 1: Server runs, inserts two prompt turns, and spills them to disk
+    {
+        server_radix_tree tree;
+        server_tier_manager tier_mgr;
+        bool init_ok = tier_mgr.init(test_dir, 64, &tree);
+        assert(init_ok);
+
+        // Turn 1 prompt: [10, 20, 30, 40]
+        auto p1 = make_test_prompt({10, 20, 30, 40});
+        auto d1_copy = original_d1;
+        auto n1 = tree.insert(p1, std::move(d1_copy));
+        assert(n1 != nullptr);
+        bool s1 = tier_mgr.save_to_disk(n1, tree);
+        assert(s1);
+        assert(n1->tier == RADIX_TIER_DISK);
+
+        // Turn 2 prompt: [10, 20, 30, 40, 50, 60]
+        auto p2 = make_test_prompt({10, 20, 30, 40, 50, 60});
+        auto d2_copy = original_d2;
+        auto n2 = tree.insert(p2, std::move(d2_copy));
+        assert(n2 != nullptr);
+        bool s2 = tier_mgr.save_to_disk(n2, tree);
+        assert(s2);
+        assert(n2->tier == RADIX_TIER_DISK);
+
+        assert(tree.total_checkpoints() == 2);
+    } // tree and tier_mgr destroyed here (simulating server restart or model reload)
+
+    // 2. Session 2: Server restarts from cold. Tree is fresh and empty.
+    {
+        server_radix_tree tree;
+        server_tier_manager tier_mgr;
+        assert(tree.total_checkpoints() == 0);
+
+        // Init with tree hydration
+        bool init_ok = tier_mgr.init(test_dir, 64, &tree);
+        assert(init_ok);
+
+        // Verify that existing on-disk chunks were hydrated into tree topology
+        assert(tree.total_checkpoints() == 2);
+        assert(tree.accounted_disk_bytes() > 0);
+
+        // Query Turn 1 prompt -> should match hydrated disk node 1
+        server_tokens req1(llama_tokens{10, 20, 30, 40}, false);
+        auto res1 = tree.find_best_match(req1, 1, 0);
+        assert(res1.node != nullptr);
+        assert(res1.node->tier == RADIX_TIER_DISK);
+        assert(res1.restorable_tokens == 4);
+        assert(res1.lexical_tokens == 4);
+
+        // Load Turn 1 payload from disk
+        bool l1 = tier_mgr.load_from_disk(res1.node);
+        assert(l1);
+        assert(res1.node->tier == RADIX_TIER_RAM);
+        assert(res1.node->data.main == original_d1.main);
+        assert(res1.node->data.drft == original_d1.drft);
+
+        // Query Turn 2 prompt -> should match hydrated disk node 2
+        server_tokens req2(llama_tokens{10, 20, 30, 40, 50, 60}, false);
+        auto res2 = tree.find_best_match(req2, 1, 0);
+        assert(res2.node != nullptr);
+        assert(res2.node->tier == RADIX_TIER_DISK);
+        assert(res2.restorable_tokens == 6);
+        assert(res2.lexical_tokens == 6);
+
+        // Load Turn 2 payload from disk
+        bool l2 = tier_mgr.load_from_disk(res2.node);
+        assert(l2);
+        assert(res2.node->tier == RADIX_TIER_RAM);
+        assert(res2.node->data.main == original_d2.main);
+        assert(res2.node->data.drft == original_d2.drft);
+    }
+
+    // Clean up
+    fs::remove_all(test_dir);
+}
+
 int main() {
     std::cout << "[test-radix-tree] Running tests...\n";
 
@@ -465,6 +549,9 @@ int main() {
 
     test_radix_tree_single_checkpoint_normalization();
     std::cout << " - test_radix_tree_single_checkpoint_normalization: PASSED\n";
+
+    test_radix_cache_persistence_across_restart();
+    std::cout << " - test_radix_cache_persistence_across_restart: PASSED\n";
 
     std::cout << "[test-radix-tree] All Radix Cache tests passed successfully!\n";
     return 0;

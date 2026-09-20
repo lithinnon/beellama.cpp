@@ -10,7 +10,7 @@
 namespace fs = std::filesystem;
 
 static constexpr uint32_t RADIX_CHUNK_MAGIC = 0x42454552; // 'BEER'
-static constexpr uint32_t RADIX_CHUNK_VERSION = 1;
+static constexpr uint32_t RADIX_CHUNK_VERSION = 2;
 
 #pragma pack(push, 1)
 struct radix_chunk_header {
@@ -23,6 +23,7 @@ struct radix_chunk_header {
     uint64_t size_spec;
     uint32_t n_checkpoints;
     uint32_t checksum;
+    int64_t  last_accessed_time;
 };
 #pragma pack(pop)
 
@@ -44,31 +45,158 @@ uint32_t server_tier_manager::compute_checksum(const uint8_t * data, size_t len)
     return server_fnv1a(data, len);
 }
 
-bool server_tier_manager::init(const std::string & base_dir, int32_t quota_mib_in) {
-    std::lock_guard<std::mutex> lock(tier_mutex);
-    disk_dir = base_dir;
-    quota_mib = quota_mib_in;
+bool server_tier_manager::init(const std::string & base_dir, int32_t quota_mib_in, server_radix_tree * tree) {
+    {
+        std::lock_guard<std::mutex> lock(tier_mutex);
+        disk_dir = base_dir;
+        quota_mib = quota_mib_in;
 
-    if (quota_mib < 0) {
-        disk_quota_bytes = (size_t) -1; // Unlimited
-    } else if (quota_mib > 0) {
-        disk_quota_bytes = static_cast<size_t>(quota_mib) * 1024ull * 1024ull;
-    } else {
-        disk_quota_bytes = 0; // Disabled
+        if (quota_mib < 0) {
+            disk_quota_bytes = (size_t) -1; // Unlimited
+        } else if (quota_mib > 0) {
+            disk_quota_bytes = static_cast<size_t>(quota_mib) * 1024ull * 1024ull;
+        } else {
+            disk_quota_bytes = 0; // Disabled
+            return true;
+        }
+
+        std::error_code ec;
+        if (!fs::exists(disk_dir, ec)) {
+            fs::create_directories(disk_dir, ec);
+            if (ec) {
+                SRV_ERR("failed to create radix cache disk directory %s: %s\n", disk_dir.c_str(), ec.message().c_str());
+                disk_quota_bytes = 0;
+                return false;
+            }
+        }
+
+        cleanup_temp_files();
+    }
+
+    if (tree != nullptr) {
+        hydrate_from_disk(*tree);
+    }
+
+    return true;
+}
+
+bool server_tier_manager::hydrate_from_disk(server_radix_tree & tree) {
+    if (!is_disk_enabled()) {
         return true;
     }
 
+    std::lock_guard<std::mutex> lock(tier_mutex);
+
     std::error_code ec;
-    if (!fs::exists(disk_dir, ec)) {
-        fs::create_directories(disk_dir, ec);
-        if (ec) {
-            SRV_ERR("failed to create radix cache disk directory %s: %s\n", disk_dir.c_str(), ec.message().c_str());
-            disk_quota_bytes = 0;
-            return false;
+    if (disk_dir.empty() || !fs::exists(disk_dir, ec) || !fs::is_directory(disk_dir, ec)) {
+        return true;
+    }
+
+    struct candidate_chunk {
+        std::string path;
+        radix_chunk_header header;
+        std::vector<llama_token> tokens;
+        size_t file_size = 0;
+    };
+
+    std::vector<candidate_chunk> candidates;
+
+    try {
+        for (const auto & entry : fs::directory_iterator(disk_dir, ec)) {
+            if (!entry.is_regular_file(ec) || entry.path().extension() != ".ckpt") {
+                continue;
+            }
+
+            std::string ckpt_path = entry.path().string();
+            size_t fsz = entry.file_size(ec);
+            if (ec || fsz < sizeof(radix_chunk_header)) {
+                continue;
+            }
+
+            std::ifstream in(ckpt_path, std::ios::binary);
+            if (!in.is_open()) {
+                continue;
+            }
+
+            radix_chunk_header header {};
+            in.read(reinterpret_cast<char *>(&header), sizeof(header));
+            if (!in.good() || header.magic != RADIX_CHUNK_MAGIC) {
+                continue;
+            }
+
+            if (header.version != RADIX_CHUNK_VERSION) {
+                SRV_INF("radix disk tier: pruning legacy v%u chunk without token index: %s\n",
+                        header.version, ckpt_path.c_str());
+                in.close();
+                fs::remove(ckpt_path, ec);
+                continue;
+            }
+
+            if (header.n_tokens == 0) {
+                continue;
+            }
+
+            const size_t token_bytes = static_cast<size_t>(header.n_tokens) * sizeof(llama_token);
+            if (fsz < sizeof(radix_chunk_header) + token_bytes + header.size_main + header.size_drft + header.size_spec) {
+                SRV_WRN("radix disk tier: truncated chunk file %s, skipping\n", ckpt_path.c_str());
+                continue;
+            }
+
+            std::vector<llama_token> tokens(header.n_tokens);
+            in.read(reinterpret_cast<char *>(tokens.data()), token_bytes);
+            if (!in.good()) {
+                SRV_WRN("radix disk tier: failed to read tokens from %s, skipping\n", ckpt_path.c_str());
+                continue;
+            }
+
+            candidates.push_back({
+                std::move(ckpt_path),
+                header,
+                std::move(tokens),
+                fsz
+            });
+        }
+    } catch (const std::exception & e) {
+        SRV_WRN("radix disk tier: exception scanning directory %s: %s\n", disk_dir.c_str(), e.what());
+    }
+
+    // Sort ascending by token count so root prefixes are inserted before child extensions
+    std::sort(candidates.begin(), candidates.end(), [](const candidate_chunk & a, const candidate_chunk & b) {
+        if (a.tokens.size() != b.tokens.size()) {
+            return a.tokens.size() < b.tokens.size();
+        }
+        return a.header.last_accessed_time < b.header.last_accessed_time;
+    });
+
+    size_t hydrated_count = 0;
+    size_t hydrated_tokens = 0;
+
+    for (auto & cand : candidates) {
+        server_prompt prompt;
+        prompt.tokens = server_tokens(std::move(cand.tokens), false);
+
+        size_t payload_bytes = cand.file_size - sizeof(radix_chunk_header) - cand.header.n_tokens * sizeof(llama_token);
+
+        auto node = tree.insert_disk_node(
+            std::move(prompt),
+            cand.path,
+            payload_bytes,
+            cand.header.last_accessed_time,
+            cand.header.node_id
+        );
+
+        if (node) {
+            hydrated_count++;
+            hydrated_tokens = std::max(hydrated_tokens, node->prompt.tokens.size());
         }
     }
 
-    cleanup_temp_files();
+    SRV_INF("radix disk tier: hydrated %zu chunks (%zu max tokens) from %s\n",
+            hydrated_count, hydrated_tokens, disk_dir.c_str());
+
+    // Enforce disk limit immediately in case existing chunks exceed quota
+    enforce_disk_limit(tree);
+
     return true;
 }
 
@@ -113,8 +241,14 @@ bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> 
     header.size_spec = node->data.spec.size();
     header.n_checkpoints = static_cast<uint32_t>(node->prompt.checkpoints.size());
 
-    // Calculate checksum of main + drft + spec payloads
+    header.last_accessed_time = node->last_accessed_time;
+
+    // Calculate checksum of tokens + main + drft + spec payloads
     uint32_t csum = 0;
+    if (header.n_tokens > 0) {
+        csum ^= compute_checksum(reinterpret_cast<const uint8_t *>(node->prompt.tokens.get_tokens().data()),
+                                 header.n_tokens * sizeof(llama_token));
+    }
     if (!node->data.main.empty()) {
         csum ^= compute_checksum(node->data.main.data(), node->data.main.size());
     }
@@ -135,6 +269,12 @@ bool server_tier_manager::save_to_disk(const std::shared_ptr<server_radix_node> 
 
         // Write header
         out.write(reinterpret_cast<const char *>(&header), sizeof(header));
+
+        // Write tokens
+        if (header.n_tokens > 0) {
+            out.write(reinterpret_cast<const char *>(node->prompt.tokens.get_tokens().data()),
+                      header.n_tokens * sizeof(llama_token));
+        }
 
         // Write main, drft, spec data
         if (header.size_main > 0) {
@@ -227,6 +367,20 @@ bool server_tier_manager::load_from_disk(const std::shared_ptr<server_radix_node
             return false;
         }
 
+        std::vector<llama_token> tokens_in_file;
+        if (header.n_tokens > 0) {
+            tokens_in_file.resize(header.n_tokens);
+            in.read(reinterpret_cast<char *>(tokens_in_file.data()),
+                    header.n_tokens * sizeof(llama_token));
+            if (!in.good()) {
+                SRV_ERR("failed to read tokens from radix chunk in %s\n", node->disk_chunk_id.c_str());
+                return false;
+            }
+            if (node->prompt.tokens.empty()) {
+                node->prompt.tokens = server_tokens(tokens_in_file, false);
+            }
+        }
+
         server_prompt_data loaded_data;
         if (header.size_main > 0) {
             loaded_data.main.resize(header.size_main);
@@ -243,6 +397,10 @@ bool server_tier_manager::load_from_disk(const std::shared_ptr<server_radix_node
 
         // Verify checksum
         uint32_t csum = 0;
+        if (!tokens_in_file.empty()) {
+            csum ^= compute_checksum(reinterpret_cast<const uint8_t *>(tokens_in_file.data()),
+                                     tokens_in_file.size() * sizeof(llama_token));
+        }
         if (!loaded_data.main.empty()) {
             csum ^= compute_checksum(loaded_data.main.data(), loaded_data.main.size());
         }
@@ -320,11 +478,16 @@ void server_tier_manager::enforce_ram_limit(server_radix_tree & tree, size_t lim
 
         auto & oldest = lru_nodes.front();
         if (is_disk_enabled()) {
-            SRV_TRC("spilling cold radix node %lu to disk (%.3f MiB)\n",
-                    (unsigned long)oldest->id, oldest->accounted_size() / (1024.0 * 1024.0));
-            if (!save_to_disk(oldest, tree)) {
-                // If save failed, evict directly
+            std::error_code ec;
+            if (!oldest->disk_chunk_id.empty() && fs::exists(oldest->disk_chunk_id, ec)) {
                 tree.evict_ram_payload(oldest);
+            } else {
+                SRV_TRC("spilling cold radix node %lu to disk (%.3f MiB)\n",
+                        (unsigned long)oldest->id, oldest->accounted_size() / (1024.0 * 1024.0));
+                if (!save_to_disk(oldest, tree)) {
+                    // If save failed, evict directly
+                    tree.evict_ram_payload(oldest);
+                }
             }
         } else {
             SRV_TRC("evicting cold radix node %lu from RAM (%.3f MiB)\n",

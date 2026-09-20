@@ -1789,7 +1789,7 @@ server_prompt_cache::server_prompt_cache(
     if (this->radix_enabled) {
         radix_tree   = std::make_unique<server_radix_tree>();
         tier_manager = std::make_unique<server_tier_manager>();
-        tier_manager->init(disk_dir, disk_quota_mib);
+        tier_manager->init(disk_dir, disk_quota_mib, radix_tree.get());
     }
 }
 
@@ -2186,22 +2186,31 @@ bool server_prompt_cache::load(
         return true;
     }
 
-    // Check if Radix Tree disk tier holds a restorable chunk
-    if (radix_enabled && radix_tree && tier_manager && tier_manager->is_disk_enabled()) {
+    // Check if Radix Tree holds a restorable chunk (either on disk or in RAM)
+    if (radix_enabled && radix_tree) {
         auto match = radix_tree->find_best_match(tokens_new, reuse_alignment, live_native_restorable_tokens);
-        if (match.node && match.node->tier == RADIX_TIER_DISK && match.restorable_tokens > live_native_restorable_tokens) {
+        if (match.node && (match.node->tier == RADIX_TIER_DISK || match.node->tier == RADIX_TIER_RAM) &&
+                match.restorable_tokens > live_native_restorable_tokens) {
             ++restore_attempts;
-            if (!tier_manager->load_from_disk(match.node)) {
-                ++restore_failures;
-                return false;
+            const bool from_disk = match.node->tier == RADIX_TIER_DISK;
+            if (from_disk) {
+                if (!tier_manager || !tier_manager->is_disk_enabled() || !tier_manager->load_from_disk(match.node)) {
+                    ++restore_failures;
+                    return false;
+                }
+                ++radix_hits_disk;
+            } else {
+                ++radix_hits_ram;
             }
-            ++radix_hits_disk;
 
             auto & data = match.node->data;
             if (data.main.empty() ||
                     io.has_draft != !data.drft.empty() ||
                     (!io.has_speculative && !data.spec.empty()) ||
                     !io.restore_transaction) {
+                if (limit_size == 0 && tier_manager && tier_manager->is_disk_enabled()) {
+                    radix_tree->evict_ram_payload(match.node);
+                }
                 ++restore_failures;
                 return false;
             }
@@ -2210,6 +2219,9 @@ bool server_prompt_cache::load(
                         data.main.data(), data.main.size(),
                         data.drft.data(), data.drft.size(),
                         data.spec.data(), data.spec.size())) {
+                if (limit_size == 0 && tier_manager && tier_manager->is_disk_enabled()) {
+                    radix_tree->evict_ram_payload(match.node);
+                }
                 ++restore_failures;
                 return false;
             }
@@ -2217,6 +2229,12 @@ bool server_prompt_cache::load(
             prompt = match.node->prompt.clone();
             match.node->touch();
             ++restore_successes;
+
+            // In 0-RAM mode, immediately evict the RAM payload after DMA restore to prevent memory bloat
+            if (limit_size == 0 && tier_manager && tier_manager->is_disk_enabled()) {
+                radix_tree->evict_ram_payload(match.node);
+            }
+
             return true;
         }
     }
@@ -2252,6 +2270,10 @@ bool server_prompt_cache::load(
 }
 
 void server_prompt_cache::update() {
+    if (radix_enabled && radix_tree && tier_manager) {
+        tier_manager->enforce_ram_limit(*radix_tree, limit_size);
+        tier_manager->enforce_disk_limit(*radix_tree);
+    }
     if (limit_size != (size_t) -1) {
         while (!states.empty() && accounted_size() > limit_size) {
             SRV_WRN(" - cache accounted-payload limit reached, removing oldest entry (size = %.3f MiB)\n", states.front().accounted_size() / (1024.0 * 1024.0));

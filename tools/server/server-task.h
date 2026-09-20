@@ -718,6 +718,7 @@ static inline server_prompt_reuse_plan server_prompt_plan_reuse(
     const llama_pos requested_p0 = requested.pos_next(result.lexical_tokens);
     for (const auto & checkpoint : prompt.checkpoints) {
         if (checkpoint.n_tokens > 0 &&
+                !checkpoint.data_tgt.empty() &&
                 checkpoint.n_tokens <= int64_t(result.lexical_tokens) &&
                 checkpoint.n_tokens%alignment == 0 &&
                 checkpoint.pos_max <= requested_p0 &&

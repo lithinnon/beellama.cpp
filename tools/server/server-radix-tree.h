@@ -72,6 +72,14 @@ public:
             server_prompt_data && data,
             int32_t alignment = 1);
 
+    // Insert an existing on-disk .ckpt chunk into the Radix tree at startup
+    std::shared_ptr<server_radix_node> insert_disk_node(
+            server_prompt && prompt,
+            std::string disk_chunk_id,
+            size_t payload_bytes,
+            int64_t last_accessed_time,
+            uint64_t node_id = 0);
+
     // Find the deepest matching node with restorable state for the requested tokens
     server_radix_match_result find_best_match(
             const server_tokens & requested,
