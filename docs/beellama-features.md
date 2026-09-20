@@ -712,7 +712,7 @@ conversations, few-shot prompts, and document analysis.
 Durable Radix node checkpoints preserve KVarN 128-token descriptor alignment
 (`KVAR_N_GROUP = 128`) and F16/BF16 KV Cache Precision Tails. Checkpointing is
 strictly boundary-driven (system prompts and conversation turn ends),
-normalizing each Radix node to a single compact canonical checkpoint ($1\text{ Node} = 1\text{ State}$)
+normalizing each Radix node to a single compact canonical checkpoint (1 Node = 1 State)
 and eliminating redundant intra-turn snapshot bloat.
 
 ### When to use it
@@ -720,8 +720,10 @@ and eliminating redundant intra-turn snapshot bloat.
 Use Radix Cache in multi-turn chat applications, document Q&A, or high-concurrency
 server workloads where multiple requests share common system prompts or branching
 histories. Use NVMe disk offloading (`--cache-disk`) when long document prefixes
-(e.g., 32K–128K tokens) must survive host memory pressure or server restarts without
-re-running prefill.
+(e.g., 32K–128K tokens) or agent system prompts must survive host memory pressure
+or server restarts without re-running prefill. At server boot, pre-existing on-disk
+checkpoints are automatically hydrated into the Radix Tree topology for instant
+prefix recovery across restarts.
 
 ### Key arguments
 

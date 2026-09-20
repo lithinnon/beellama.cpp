@@ -10,7 +10,7 @@ This guide covers the architecture, storage tiers, KVarN alignment rules, checkp
 
 ### The Problem with Flat Linear Prompt Caching
 In standard llama.cpp, cached prompt states are stored in a linear list. Every incoming prompt must scan all cached entries sequentially and compute the longest common prefix (LCP). Under high concurrency or long multi-turn sessions, this approach causes:
-- $O(N \cdot L)$ scan overhead across $N$ cache entries of length $L$.
+- `O(N * L)` scan overhead across `N` cache entries of length `L`.
 - No awareness of shared sub-prefixes across branching conversations.
 - Redundant KV-cache recomputation when users branch off a shared document or system prompt.
 - High VRAM pressure, forcing cache entries to be discarded rather than staged to cheaper storage tiers.
@@ -41,7 +41,7 @@ RXC replaces the linear list with a token-level **Radix Tree** (compressed prefi
     "Assistant 1: ..."             "Assistant 2: ..."
 ```
 
-Lookup complexity is $O(L)$ where $L$ is the token length of the incoming prompt, completely independent of how many thousands of conversation branches are cached.
+Lookup complexity is `O(L)` where `L` is the token length of the incoming prompt, completely independent of how many thousands of conversation branches are cached.
 
 ---
 
@@ -75,7 +75,7 @@ RXC decouples KV-cache retention from GPU VRAM limits by managing three tiers of
 - **Host RAM (`--cache-ram`, `-cram`):** Limits total memory occupied by warm Radix checkpoints. Setting `-cram -1` allows unlimited RAM utilization. Setting `-cram 0` completely disables host RAM retention and streams checkpoints directly to NVMe SSD with true 0-RAM overhead.
 - **NVMe Disk (`--cache-disk`, `-cdisk`):** Global persistent SSD quota in MiB. Setting `-cdisk -1` allows unlimited disk caching up to physical drive capacity.
 - **Global Root Scavenging:** When `--cache-disk` is configured, the disk limit applies globally across all model subdirectories in `~/.cache/beellama.cpp/radix/`. If the combined footprint exceeds the quota, cross-model LRU scavenging automatically purges the globally oldest `.ckpt` files first.
-- **Eviction Policies (`--radix-eviction`):** When quotas are reached, colder nodes are selected via `lru` (Least Recently Used), `lfu` (Least Frequently Used), or `cost` (recomputation cost = token count $\times$ access frequency).
+- **Eviction Policies (`--radix-eviction`):** When quotas are reached, colder nodes are selected via `lru` (Least Recently Used), `lfu` (Least Frequently Used), or `cost` (recomputation cost = `token count * access frequency`).
 
 ---
 
@@ -83,7 +83,9 @@ RXC decouples KV-cache retention from GPU VRAM limits by managing three tiers of
 
 To eliminate vocabulary collisions, tensor shape mismatches, and quantization drift across model switches, BeeLlama automatically isolates disk checkpoints into dedicated model fingerprint subfolders:
 
-$$\text{Subdirectory} = \texttt{<model\_name>}\_\texttt{<quant>}\_\texttt{k-<ctk>}\_\texttt{v-<ctv>}$$
+```
+Subdirectory = <model_name>_<quant>_k-<ctk>_v-<ctv>
+```
 
 ```
 ~/.cache/beellama.cpp/radix/
@@ -106,36 +108,47 @@ $$\text{Subdirectory} = \texttt{<model\_name>}\_\texttt{<quant>}\_\texttt{k-<ctk
 BeeLlama's KVarN target KV-cache compression groups attention state into 128-token rotated and normalized tiles (`KVAR_N_GROUP = 128`).
 
 - **Durable Checkpoints:** RXC enforces that durable KVarN checkpoints snap to complete 128-token boundaries.
-- **Precision Tail Overlay:** Active trailing tokens ($< 128$ tokens) remain in exact F16/BF16 staging buffers without corrupting compressed historical tiles.
+- **Precision Tail Overlay:** Active trailing tokens (< 128 tokens) remain in exact F16/BF16 staging buffers without corrupting compressed historical tiles.
 - **Safe Prefix Reuse:** During prefix lookup, RXC validates that restorable token counts match KVarN tile alignments, preventing partial-tile decoding artifacts.
 
 ---
 
-## 5. Boundary-Driven Checkpointing & $1\text{ Node} = 1\text{ State}$ Normalization
+## 5. Boundary-Driven Checkpointing & 1 Node = 1 State Normalization
 
 RXC operates on a lean **boundary-driven checkpointing** policy to maximize prefix reuse while eliminating storage bloat:
 
 1. **System & Turn Boundaries:** KV-cache state snapshots are automatically captured upon generation turn completion and prompt completion boundaries. **Zero prefill interrupt latency.**
-2. **Single Canonical State per Node:** When inserting into the Radix Tree, intermediate ancestral checkpoint lists are pruned so each node holds exactly $1$ canonical checkpoint ($1\text{ Node} = 1\text{ State}$), reducing checkpoint storage by over $6\times$.
+2. **Single Canonical State per Node:** When inserting into the Radix Tree, intermediate ancestral checkpoint lists are pruned so each node holds exactly 1 canonical checkpoint (1 Node = 1 State), reducing checkpoint storage by over 6x.
 
 > [!TIP]
 > **Turn Checkpointing Advantage:** Prefill and generation operate at 100% full hardware speed without intermediate intra-prompt interrupts. The snapshot is saved cleanly upon generation completion.
 
 ---
 
-## 6. Crash Resilience & Atomic Disk I/O
+## 6. Crash Resilience, Boot Hydration & Process Persistence
 
-To guarantee zero cache corruption across server crashes or power failures:
+To guarantee zero cache corruption across server crashes or power failures, while enabling instant prefix recovery across server restarts:
 
 1. **Two-Phase Atomic Commits:**
    - Checkpoint payloads are written to a temporary file (`.ckpt.tmp.<pid>.<uuid>`).
    - The file is flushed to physical NVMe media via POSIX `fsync()`.
    - The file is atomically renamed to its canonical chunk path (`chunk_<id>_<hash>.ckpt`).
-2. **Checksum Verification:**
-   - Every `.ckpt` chunk header includes an FNV-1a checksum of the payload.
+2. **v2 Token Serialization & Checksum Verification:**
+   - Every `.ckpt` chunk header stores token counts, token IDs, and an FNV-1a checksum covering tokens, target KV, draft KV, and speculative state buffers.
    - Corrupt or truncated chunks are automatically detected and discarded.
 3. **Startup Orphan Pruning:**
    - When `llama-server` boots with `--cache-disk`, it automatically purges orphaned `.tmp` files left behind by prior ungraceful shutdowns.
+4. **Boot-Time Disk Hydration (`hydrate_from_disk`):**
+   - On server startup or daemon reboot, BeeLlama scans the model's disk cache subdirectory (`~/.cache/beellama.cpp/radix/<fingerprint>/`).
+   - Validates chunk headers and reads serialized token prefixes into candidate records.
+   - Sorts candidate chunks ascending by token count, ensuring root prefixes are anchored before child branches.
+   - Reconstructs the Radix Tree topology in memory via `insert_disk_node()`, preserving access timestamps, edge splits, and payload offsets.
+   - Automatically unlinks obsolete legacy v1 chunks lacking token indexing.
+   - Enforces disk quotas immediately to ensure existing caches comply with `--cache-disk` limits.
+
+> [!NOTE]
+> **Cold Restart Acceleration:**
+> By hydrating existing `.ckpt` chunks at startup, a freshly booted `llama-server` can restore multi-thousand token contexts (e.g. system prompts, coding agent tool schemas, long documents) directly from NVMe without re-evaluating the raw text. In live benchmarks with Qwen 27B, restoring 14,000 prefix tokens from NVMe takes ~14s (including GPU DMA transfer) compared to ~60s for full prefill.
 
 ---
 
@@ -146,14 +159,14 @@ To guarantee zero cache corruption across server crashes or power failures:
 | `-rxc` | `--radix-cache` | `LLAMA_ARG_RADIX_CACHE` | `true` (server) | Enables dynamic Radix Tree prefix caching. |
 | `-no-rxc`| `--no-radix-cache`| — | — | Disables Radix Tree prefix caching. |
 | `-cram` | `--cache-ram N` | `LLAMA_ARG_CACHE_RAM` | `8192` | Host RAM quota in MiB (`-1` = unlimited, `0` = direct NVMe spill). |
-| `-cdisk`| `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | Global NVMe SSD quota in MiB (`-1` = unlimited, `0` = disabled). |
-| — | `--cache-disk-dir PATH`| `LLAMA_ARG_CACHE_DISK_DIR` | `~/.cache/beellama.cpp/radix` | Root directory path for disk `.ckpt` files. |
+| `-cdisk`| `--cache-disk N` | `LLAMA_ARG_CACHE_DISK` | `0` | Global NVMe SSD quota in MiB (`-1` = unlimited, `0` = disabled). Enables persistent `.ckpt` storage and boot-time hydration across server restarts. |
+| — | `--cache-disk-dir PATH`| `LLAMA_ARG_CACHE_DISK_DIR` | `~/.cache/beellama.cpp/radix` | Root directory path for disk `.ckpt` files. Automatically isolates models and rehydrates prefix trees at boot. |
 | `-ctxcp`| `--ctx-checkpoints N`| `LLAMA_ARG_CTX_CHECKPOINTS` | `32` | Max checkpoints retained along a single branch. |
 | — | `--radix-eviction POLICY`| `LLAMA_ARG_RADIX_EVICTION` | `lru` | Eviction strategy: `lru`, `lfu`, or `cost`. |
 
 ---
 
-## 9. Practical Deployment Examples
+## 8. Practical Deployment Examples
 
 ### Example 1: Multi-Turn Server with RAM Caching (Default Setup)
 Serves chat with 16 GB Host RAM allocated for instant prefix reuse:
@@ -162,7 +175,7 @@ llama-server \
   -m models/qwen3.6-27b-q5_k_s.gguf \
   -c 32768 -b 2048 -ub 512 \
   -ctk kvarn5 -ctv kvarn4 --kv-tail-tokens 1024 \
-  -rxc -cram 16384 -cm turn \
+  -rxc -cram 16384 \
   --port 8080
 ```
 
@@ -172,25 +185,25 @@ Spills warm checkpoints directly to NVMe SSD without duplicate host RAM consumpt
 llama-server \
   -m models/gemma-4-26b-a4b.gguf \
   -c 32768 -b 1024 -ub 1024 -ngl all \
-  -cram 0 -cdisk 16384 -cm turn \
+  -cram 0 -cdisk 16384 \
   --load-mode dio \
   -ctk bf16 -ctv bf16 -fa on \
   --port 8080
 ```
 
-### Example 3: Document Ingestion with Step Checkpointing
-Ingests massive 100K+ token books or codebases with checkpoints every 4096 tokens:
+### Example 3: Document Ingestion & Coding Agent Serving
+Ingests long documents or serves coding agents (e.g. `pi`) with cold-restart persistence:
 ```bash
 llama-server \
-  -m models/qwen3.6-27b-q5_k_s.gguf \
+  -m models/qwen3.8-27b.gguf \
   -c 131072 -b 4096 -ub 512 \
-  -rxc -cdisk -1 -cm both -cms 4096 \
+  -rxc -cdisk 32768 \
   --port 8080
 ```
 
 ---
 
-## 10. Observability & Telemetry
+## 9. Observability & Telemetry
 
 ### OpenAI API Response Telemetry
 Standard `/v1/chat/completions` responses expose cached token breakdowns:
