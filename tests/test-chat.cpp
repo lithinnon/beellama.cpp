@@ -3179,6 +3179,13 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 if (string_ends_with(params.prompt, "<|turn>model\n")) {
                     throw std::runtime_error("Gemma 4: generation prompt was modified despite add_generation_prompt=false");
                 }
+                if (params.format != COMMON_CHAT_FORMAT_PEG_GEMMA4) {
+                    throw std::runtime_error("Gemma 4: expected format PEG_GEMMA4");
+                }
+                const auto delims_json = params.message_delimiters.to_json();
+                if (delims_json.empty()) {
+                    throw std::runtime_error("Gemma 4: message_delimiters must not be empty");
+                }
             }
         }
 

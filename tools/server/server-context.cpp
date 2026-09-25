@@ -2686,6 +2686,29 @@ private:
         if (lcp_len == 0) {
             return 0;
         }
+
+        // If the model uses SWA/ISWA, verify that the sliding window has not discarded
+        // prefix tokens needed up to lcp_len.
+        if (n_swa > 0) {
+            const llama_pos requested_p0 = slot.prompt.tokens.pos_next(lcp_len);
+            const llama_pos pos_min = llama_memory_seq_pos_min(llama_get_memory(slot.ctx_tgt), slot.id);
+            const bool has_new_tokens = (lcp_len < requested.size());
+            const llama_pos pos_min_thold = std::max(0, requested_p0 - n_swa - (has_new_tokens ? 0 : 1));
+            if (pos_min < 0 || (pos_min > 0 && pos_min >= pos_min_thold)) {
+                SLT_TRC(slot, "live slot native rollback refused: SWA window discarded prefix (pos_min = %d, pos_min_thold = %d)\n",
+                        pos_min, pos_min_thold);
+                return 0;
+            }
+            if (slot.draft_owns_state && slot.ctx_dft != nullptr) {
+                const llama_pos pos_min_dft = llama_memory_seq_pos_min(llama_get_memory(slot.ctx_dft), slot.id);
+                if (pos_min_dft < 0 || (pos_min_dft > 0 && pos_min_dft >= pos_min_thold)) {
+                    SLT_TRC(slot, "live slot native rollback refused: draft SWA window discarded prefix (pos_min = %d, pos_min_thold = %d)\n",
+                            pos_min_dft, pos_min_thold);
+                    return 0;
+                }
+            }
+        }
+
         if (lcp_len == slot.prompt.tokens.size()) {
             return lcp_len;
         }
@@ -4012,9 +4035,10 @@ private:
                                                 pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                                 n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
                                                 const bool restored_from_ram = slot.prompt_cache_source == "ram";
-                                                slot.prompt_cache_source = restored_from_ram ? "ram" : "checkpoint";
+                                                const bool restored_from_disk = slot.prompt_cache_source == "disk";
+                                                slot.prompt_cache_source = restored_from_ram ? "ram" : (restored_from_disk ? "disk" : "checkpoint");
                                                 slot.prompt_cache_reason = restored_from_ram ?
-                                                        "ram_checkpoint_restore_committed" : "checkpoint_restore_committed";
+                                                        "ram_checkpoint_restore_committed" : (restored_from_disk ? "disk_checkpoint_restore_committed" : "checkpoint_restore_committed");
                                                 SLT_TRC(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
                                             }
                                         }
@@ -4090,7 +4114,9 @@ private:
                                 : value;
                     };
                     common_memory_seq_rm_result seq_rm_result = COMMON_MEMORY_SEQ_RM_APPLIED;
-                    if (slot.prompt_cache_source != "checkpoint" && slot.prompt_cache_source != "ram") {
+                    if (slot.prompt_cache_source != "checkpoint" &&
+                        slot.prompt_cache_source != "ram" &&
+                        slot.prompt_cache_source != "disk") {
                         seq_rm_result = slot.mem.seq_rm_suffix(
                                 slot.id, p0, normalize_p0, planned_p0);
                     }

@@ -3491,8 +3491,21 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         return common_chat_params_init_ministral_3(tmpl, params);
     }
 
+    // Gemma4 format detection
+    if (src.find("'<|tool_call>call:'") != std::string::npos) {
+        if (src.find("{#- OpenAI Chat Completions:") == std::string::npos) {
+            // apply workarounds if using the older gemma4 templates
+            LOG_WRN("%s: detected an outdated gemma4 chat template, applying compatibility workarounds. "
+                    "Consider updating to the official template.\n", __func__);
+            workaround::convert_tool_responses_gemma4(params.messages);
+        }
+        return common_chat_params_init_gemma4(tmpl, params);
+    }
+
     // GPT-OSS - has unique channel-based structure that needs dedicated handler
-    if (src.find("<|channel|>") != std::string::npos) {
+    if (src.find("<|channel|>") != std::string::npos &&
+        (src.find("<|channel|>analysis") != std::string::npos ||
+         (src.find("<|start|>") != std::string::npos && src.find("<|message|>") != std::string::npos))) {
         LOG_DBG("Using specialized template: GPT-OSS\n");
         return common_chat_params_init_gpt_oss(tmpl, params);
     }
@@ -3574,16 +3587,6 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         return common_chat_params_init_deepseek_v3_2(tmpl, params);
     }
 
-    // Gemma4 format detection
-    if (src.find("'<|tool_call>call:'") != std::string::npos) {
-        if (src.find("{#- OpenAI Chat Completions:") == std::string::npos) {
-            // apply workarounds if using the older gemma4 templates
-            LOG_WRN("%s: detected an outdated gemma4 chat template, applying compatibility workarounds. "
-                    "Consider updating to the official template.\n", __func__);
-            workaround::convert_tool_responses_gemma4(params.messages);
-        }
-        return common_chat_params_init_gemma4(tmpl, params);
-    }
 
     // MiniCPM5 - XML tool calls with <function name="..."><param name="...">...</param></function>
     if (src.find("Tool usage guidelines:") != std::string::npos &&

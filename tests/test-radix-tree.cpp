@@ -328,6 +328,44 @@ static void test_radix_cache_recurrent_and_multiturn_state() {
     assert(res2c.restorable_tokens == 5);
 }
 
+static void test_swa_degraded_live_slot_radix_recovery() {
+    server_radix_tree tree;
+
+    // Simulate Turn 1: [1..100] User, with intermediate checkpoint at 100
+    llama_tokens turn1_tokens(100);
+    for (int i = 0; i < 100; ++i) turn1_tokens[i] = i + 1;
+    auto p1 = make_test_prompt(turn1_tokens);
+    auto n1 = tree.insert(p1, make_test_data(512));
+    assert(n1 != nullptr);
+
+    // Simulate Turn 2: Turn 1 (100 tokens) + Assistant Reply (50 tokens) -> 150 tokens
+    llama_tokens turn2_tokens(150);
+    for (int i = 0; i < 150; ++i) turn2_tokens[i] = i + 1;
+    auto p2 = make_test_prompt(turn2_tokens);
+    auto n2 = tree.insert(p2, make_test_data(768));
+    assert(n2 != nullptr);
+
+    // Turn 3: Shared prefix is 100 tokens, then divergent tokens (like SillyTavern moving Author's Note)
+    llama_tokens turn3_tokens(120);
+    for (int i = 0; i < 100; ++i) turn3_tokens[i] = i + 1;
+    for (int i = 100; i < 120; ++i) turn3_tokens[i] = 9000 + i;
+    server_tokens req_turn3(turn3_tokens, false);
+
+    // Case A: If live slot falsely claimed 100 native restorable tokens, but SWA degraded:
+    // match.restorable_tokens (100) is NOT strictly greater than live_native_restorable_tokens (100),
+    // which causes server_prompt_cache::load to reject the Radix restore!
+    auto res_masked = tree.find_best_match(req_turn3, 1, 100);
+    assert(!(res_masked.restorable_tokens > 100));
+
+    // Case B: With SWA awareness, live slot reports 0 native restorable tokens.
+    // Radix search with min_restorable_tokens = 0 finds n1 with 100 restorable tokens > 0,
+    // which allows server_prompt_cache::load to accept and restore the Radix checkpoint!
+    auto res_recovered = tree.find_best_match(req_turn3, 1, 0);
+    assert(res_recovered.node == n1);
+    assert(res_recovered.restorable_tokens == 100);
+    assert(res_recovered.restorable_tokens > 0);
+}
+
 static void test_multimodel_cache_isolation_and_quotas() {
     std::string base_dir = "/tmp/beellama_radix_multimodel_test_" +
                            std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()) + "/radix";
@@ -546,6 +584,9 @@ int main() {
 
     test_multimodel_cache_isolation_and_quotas();
     std::cout << " - test_multimodel_cache_isolation_and_quotas: PASSED\n";
+
+    test_swa_degraded_live_slot_radix_recovery();
+    std::cout << " - test_swa_degraded_live_slot_radix_recovery: PASSED\n";
 
     test_radix_tree_single_checkpoint_normalization();
     std::cout << " - test_radix_tree_single_checkpoint_normalization: PASSED\n";
