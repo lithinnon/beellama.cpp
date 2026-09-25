@@ -1433,6 +1433,13 @@ bool llama_kv_cache::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1)
     if (tail_metadata_only || tail_plan.has_owned_body || tail_plan.has_shared_body) {
         return true;
     }
+    // If the sequence prefix has never been evicted by the sliding window (pos_min <= 0),
+    // all history from position 0 up to p0 - 1 is physically retained in the exact tail.
+    // Truncating the suffix at p0 leaves a complete, contiguous prefix intact.
+    const llama_pos pos_min = seq_pos_min(seq_id);
+    if (pos_min <= 0) {
+        return true;
+    }
     return llama_kv_tail_can_remove_suffix(
             seq_pos_max(seq_id), p0, p1, tail_rollback_tokens);
 }
