@@ -206,6 +206,49 @@ static int test_vec_dot_q(bool verbose) {
     return num_failed;
 }
 
+static int test_snc_norm_preservation(bool verbose) {
+    int num_failed = 0;
+    const size_t test_size = 32 * 128;
+    std::vector<float> test_data(test_size);
+    generate_data(0.5f, test_size, test_data.data());
+
+    for (ggml_type type : {GGML_TYPE_SNC4, GGML_TYPE_SNC8}) {
+        const auto * qfns = ggml_get_type_traits(type);
+        const auto * qfns_cpu = ggml_get_type_traits_cpu(type);
+        assert(qfns_cpu->from_float && qfns->to_float);
+
+        std::vector<uint8_t> tmp_q(2 * test_size);
+        std::vector<float> tmp_out(test_size);
+
+        qfns_cpu->from_float(test_data.data(), tmp_q.data(), test_size);
+        qfns->to_float(tmp_q.data(), tmp_out.data(), test_size);
+
+        double em_sum = 0.0;
+        size_t n_blocks = test_size / 32;
+        for (size_t b = 0; b < test_size; b += 32) {
+            double norm_true = 0.0;
+            double norm_rec = 0.0;
+            for (size_t j = 0; j < 32; ++j) {
+                norm_true += (double)test_data[b + j] * test_data[b + j];
+                norm_rec  += (double)tmp_out[b + j] * tmp_out[b + j];
+            }
+            norm_true = sqrt(norm_true);
+            norm_rec  = sqrt(norm_rec);
+            const double diff = norm_true - norm_rec;
+            em_sum += diff * diff;
+        }
+        const double em_mean = em_sum / n_blocks;
+        const double max_allowed_em = (type == GGML_TYPE_SNC4) ? 5e-3 : 1e-4;
+        const bool failed = !(em_mean < max_allowed_em);
+        num_failed += failed;
+        if (failed || verbose) {
+            printf("%5s norm preservation (E_M < %.1e):  %s (mean E_M = %.6e)\n",
+                   ggml_type_name(type), max_allowed_em, RESULT_STR[failed], em_mean);
+        }
+    }
+    return num_failed;
+}
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
 
@@ -227,6 +270,7 @@ int main(int argc, char * argv[]) {
 
     num_failed += test_vec_dot_f32(verbose);
     num_failed += test_vec_dot_q(verbose);
+    num_failed += test_snc_norm_preservation(verbose);
 
     if (num_failed || verbose) {
         printf("%d tests failed\n", num_failed);

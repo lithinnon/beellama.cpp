@@ -229,6 +229,64 @@ f16vec4 dequantFuncQ2_1_v(const in decodeBufQ2_1 bl, const in uint blockCoords[2
     return result;
 }
 
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufSNC4 {
+   block_snc4_packed16 block;
+};
+
+float16_t dequantFuncSNC4(const in decodeBufSNC4 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+    const uint shift = (idx & 0x10) >> 2;
+    uint32_t qs = uint32_t(bl.block.qs[(idx & 0xE) >> 1]);
+    qs >>= shift;
+    qs &= 0x0F0F;
+    qs = unpack8(qs)[idx & 1];
+    float16_t ret = (float16_t(qs) - float16_t(8)) * d;
+    return ret;
+}
+
+f16vec4 dequantFuncSNC4_v(const in decodeBufSNC4 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+    const uint shift = (idx & 0x10) >> 2;     // 0 or 4
+    const uint qs_i = (idx & 0xE) >> 1;       // even, in {0,2,4,6}
+    const uint qsw = uint32_t(bl.block.qs[qs_i    ])
+                   | (uint32_t(bl.block.qs[qs_i + 1u]) << 16);
+    // shift in {0,4}: per-byte mask 0x0F isolates the wanted nibble in each byte.
+    const uint q4   = (qsw >> shift) & 0x0F0F0F0Fu;
+    const u8vec4 q  = unpack8(q4);
+    return f16vec4((vec4(q) - vec4(8.0)) * vec4(float(d)));
+}
+
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufSNC8 {
+   block_snc8_packed16 block;
+};
+
+float16_t dequantFuncSNC8(const in decodeBufSNC8 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+    const uint iqs = idx;
+
+    // Load 16b and select the byte for this element
+    int32_t qs = unpack8(bl.block.qs[(iqs & 0x1E) >> 1])[iqs & 1];
+    float16_t ret = float16_t(qs) * d;
+    return ret;
+}
+
+f16vec4 dequantFuncSNC8_v(const in decodeBufSNC8 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+    const uint base = idx >> 1u;
+    const uint w =  uint(uint16_t(bl.block.qs[base]))
+                 | (uint(uint16_t(bl.block.qs[base + 1u])) << 16u);
+    const i8vec4 qi = unpack8(int32_t(w));
+    return f16vec4(vec4(qi) * vec4(float(d)));
+}
+
 layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ4_0 {
    block_q4_0_packed16 block;
 };

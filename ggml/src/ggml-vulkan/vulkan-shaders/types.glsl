@@ -262,6 +262,44 @@ struct block_q2_1 {
 #define DATA_A_QUANT_LEGACY
 #endif
 
+#define QUANT_K_SNC4 32
+#define QUANT_R_SNC4 2
+struct block_snc4 {
+    float16_t d;
+    uint8_t qs[16];
+};
+struct block_snc4_packed16 {
+    float16_t d;
+    uint16_t qs[16/2];
+};
+#if defined(DATA_A_SNC4)
+#define QUANT_K QUANT_K_SNC4
+#define QUANT_R QUANT_R_SNC4
+#define QUANT_AUXF 1
+#define A_TYPE block_snc4
+#define A_TYPE_PACKED16 block_snc4_packed16
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_SNC8 32
+#define QUANT_R_SNC8 1
+struct block_snc8 {
+    float16_t d;
+    int8_t qs[32];
+};
+struct block_snc8_packed16 {
+    float16_t d;
+    int16_t qs[32/2];
+};
+#if defined(DATA_A_SNC8)
+#define QUANT_K QUANT_K_SNC8
+#define QUANT_R QUANT_R_SNC8
+#define QUANT_AUXF 1
+#define A_TYPE block_snc8
+#define A_TYPE_PACKED16 block_snc8_packed16
+#define DATA_A_QUANT_LEGACY
+#endif
+
 #define QUANT_K_Q8_0 32
 #define QUANT_R_Q8_0 1
 

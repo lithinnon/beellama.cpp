@@ -290,6 +290,80 @@ void quantize(uint dst_idx, uint src_idx)
 }
 #endif
 
+#if defined(DATA_A_SNC4)
+void quantize(uint dst_idx, uint src_idx)
+{
+    float amax = 0.0;
+    float vmax = 0.0;
+    float sum_sq_true = 0.0;
+
+    [[unroll]] for (int j = 0; j < QUANT_K_SNC4; ++j) {
+        const float v = float(data_s[src_idx + j]);
+        sum_sq_true += v * v;
+        if (amax < abs(v)) {
+            amax = abs(v);
+            vmax = v;
+        }
+    }
+
+    const float d  = vmax / -8.0;
+    const float id = (d != 0.0) ? 1.0/d : 0.0;
+
+    float sum_sq_uncal = 0.0;
+
+    [[unroll]] for (int j = 0; j < QUANT_K_SNC4/2; ++j) {
+        const float x0 = float(data_s[src_idx + 0               + j])*id;
+        const float x1 = float(data_s[src_idx + QUANT_K_SNC4/2 + j])*id;
+
+        const uint xi0 = min(15, int(x0 + 8.5));
+        const uint xi1 = min(15, int(x1 + 8.5));
+
+        data_q[dst_idx].qs[j]  = uint8_t(xi0 | (xi1 << 4));
+
+        const float u0 = float(int(xi0) - 8) * d;
+        const float u1 = float(int(xi1) - 8) * d;
+        sum_sq_uncal += u0 * u0 + u1 * u1;
+    }
+
+    const float n_true = sqrt(sum_sq_true + 1e-10);
+    const float n_uncal = sqrt(sum_sq_uncal + 1e-10);
+    const float gamma = n_true / n_uncal;
+    data_q[dst_idx].d = float16_t(d * gamma);
+}
+#endif
+
+#if defined(DATA_A_SNC8)
+void quantize(uint dst_idx, uint src_idx)
+{
+    float amax = 0.0;
+    float sum_sq_true = 0.0;
+
+    [[unroll]] for (int j = 0; j < QUANT_K_SNC8; ++j) {
+        const float v = float(data_s[src_idx + j]);
+        sum_sq_true += v * v;
+        amax = max(amax, abs(v));
+    }
+
+    const float d = amax / 127.0;
+    const float id = (d != 0.0) ? 1.0/d : 0.0;
+
+    float sum_sq_uncal = 0.0;
+
+    [[unroll]] for (int j = 0; j < QUANT_K_SNC8; ++j) {
+        const float x0 = float(data_s[src_idx + j])*id;
+        const int q0 = clamp(int(round(x0)), -128, 127);
+        data_q[dst_idx].qs[j] = int8_t(q0);
+        const float u0 = float(q0) * d;
+        sum_sq_uncal += u0 * u0;
+    }
+
+    const float n_true = sqrt(sum_sq_true + 1e-10);
+    const float n_uncal = sqrt(sum_sq_uncal + 1e-10);
+    const float gamma = n_true / n_uncal;
+    data_q[dst_idx].d = float16_t(d * gamma);
+}
+#endif
+
 #if defined(DATA_A_Q8_0)
 void quantize(uint dst_idx, uint src_idx)
 {

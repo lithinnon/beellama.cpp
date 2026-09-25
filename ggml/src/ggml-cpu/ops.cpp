@@ -4674,6 +4674,8 @@ void ggml_compute_forward_out_prod(
         case GGML_TYPE_Q3_1:
         case GGML_TYPE_Q2_0S:
         case GGML_TYPE_Q2_1:
+        case GGML_TYPE_SNC4:
+        case GGML_TYPE_SNC8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
         case GGML_TYPE_Q2_K:
@@ -5254,6 +5256,8 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_Q3_1:
         case GGML_TYPE_Q2_0S:
         case GGML_TYPE_Q2_1:
+        case GGML_TYPE_SNC4:
+        case GGML_TYPE_SNC8:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
         case GGML_TYPE_MXFP4:
@@ -6052,6 +6056,8 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_Q3_1:
         case GGML_TYPE_Q2_0S:
         case GGML_TYPE_Q2_1:
+        case GGML_TYPE_SNC4:
+        case GGML_TYPE_SNC8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
         case GGML_TYPE_Q2_K:

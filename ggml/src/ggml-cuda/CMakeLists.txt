@@ -140,6 +140,13 @@ if (CUDAToolkit_FOUND)
             list(GET PARTS 1 V_TYPE)
             ggml_add_fattn_vec_pair(GGML_SOURCES_CUDA "${FA_VEC_PREFIX}" "${K_TYPE}" "${V_TYPE}")
         endforeach()
+        set(SNC_PAIRS snc4:snc4 snc8:snc8 snc4:snc8 snc8:snc4 snc4:f16 snc8:f16 f16:snc4 f16:snc8 snc4:bf16 snc8:bf16 bf16:snc4 bf16:snc8)
+        foreach(PAIR ${SNC_PAIRS})
+            string(REPLACE ":" ";" PARTS "${PAIR}")
+            list(GET PARTS 0 K_TYPE)
+            list(GET PARTS 1 V_TYPE)
+            ggml_add_fattn_vec_pair(GGML_SOURCES_CUDA "${FA_VEC_PREFIX}" "${K_TYPE}" "${V_TYPE}")
+        endforeach()
     endif()
 
     ggml_add_backend_library(ggml-cuda

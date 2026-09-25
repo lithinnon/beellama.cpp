@@ -1341,6 +1341,8 @@ llama_kv_cache::llama_kv_cache(
             !attn_rot_disable &&
             n_embd_head_v_all > 0 &&
             ggml_is_quantized(type_v) &&
+            type_v != GGML_TYPE_SNC4 &&
+            type_v != GGML_TYPE_SNC8 &&
             hparams.n_embd_head_v() % 64 == 0;
     }
 

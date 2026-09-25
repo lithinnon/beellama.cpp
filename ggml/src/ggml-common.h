@@ -142,6 +142,12 @@ typedef sycl::half2 ggml_half2;
 #define QI8_1 (QK8_1 / (4 * QR8_1))
 #define QR8_1 1
 
+#define QI_SNC4 (QK_SNC4 / (4 * QR_SNC4))
+#define QR_SNC4 2
+
+#define QI_SNC8 (QK_SNC8 / (4 * QR_SNC8))
+#define QR_SNC8 1
+
 #define QI2_K (QK_K / (4*QR2_K))
 #define QR2_K 4
 
@@ -351,6 +357,21 @@ typedef struct {
     int8_t qs[QK8_1]; // quants
 } block_q8_1;
 static_assert(sizeof(block_q8_1) == 2*sizeof(ggml_half) + QK8_1, "wrong q8_1 block size/padding");
+
+// Streaming Norm-Calibrated (SNC) KV formats
+#define QK_SNC4 32
+typedef struct {
+    ggml_half d;               // calibrated scale d* = d0 * gamma
+    uint8_t   qs[QK_SNC4 / 2]; // 4-bit nibbles (range [-8, 7])
+} block_snc4;
+static_assert(sizeof(block_snc4) == sizeof(ggml_half) + QK_SNC4 / 2, "wrong snc4 block size/padding");
+
+#define QK_SNC8 32
+typedef struct {
+    ggml_half d;             // calibrated scale d* = d0 * gamma
+    int8_t    qs[QK_SNC8];   // 8-bit signed values (range [-128, 127])
+} block_snc8;
+static_assert(sizeof(block_snc8) == sizeof(ggml_half) + QK_SNC8, "wrong snc8 block size/padding");
 
 //
 // Ternary quantization

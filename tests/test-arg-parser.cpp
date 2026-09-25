@@ -406,6 +406,18 @@ static void test(void) {
     assert(common_context_params_to_llama(params).kv_tail_type == GGML_TYPE_F16);
 
     params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "snc4", "--cache-type-v", "snc4"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.cache_type_k == GGML_TYPE_SNC4);
+    assert(params.cache_type_v == GGML_TYPE_SNC4);
+
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "snc8", "--cache-type-v", "snc8"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.cache_type_k == GGML_TYPE_SNC8);
+    assert(params.cache_type_v == GGML_TYPE_SNC8);
+
+    params = common_params();
     argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--cache-type-v", "kvarn4",
             "--kv-tail-tokens", "1024"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));

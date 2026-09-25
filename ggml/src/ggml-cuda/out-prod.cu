@@ -32,6 +32,11 @@ static __device__ __forceinline__ float out_prod_dequant_value(
     } else if constexpr (type == GGML_TYPE_Q8_0) {
         dequantize_q8_0(row, ib, ir & ~1, value);
         return (ir & 1) ? value.y : value.x;
+    } else if constexpr (type == GGML_TYPE_SNC4) {
+        dequantize_snc4(row, ib, ir % 16, value);
+    } else if constexpr (type == GGML_TYPE_SNC8) {
+        dequantize_snc8(row, ib, ir & ~1, value);
+        return (ir & 1) ? value.y : value.x;
     } else if constexpr (type == GGML_TYPE_IQ4_NL) {
         const block_iq4_nl & block = reinterpret_cast<const block_iq4_nl *>(row)[ib];
         const uint8_t packed = block.qs[ir % 16];
@@ -139,6 +144,8 @@ void ggml_cuda_out_prod(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             case GGML_TYPE_Q6_0:  LAUNCH_OUT_PROD(GGML_TYPE_Q6_0);  break;
             case GGML_TYPE_Q6_1:  LAUNCH_OUT_PROD(GGML_TYPE_Q6_1);  break;
             case GGML_TYPE_Q8_0:  LAUNCH_OUT_PROD(GGML_TYPE_Q8_0);  break;
+            case GGML_TYPE_SNC4:  LAUNCH_OUT_PROD(GGML_TYPE_SNC4);  break;
+            case GGML_TYPE_SNC8:  LAUNCH_OUT_PROD(GGML_TYPE_SNC8);  break;
             case GGML_TYPE_IQ4_NL: LAUNCH_OUT_PROD(GGML_TYPE_IQ4_NL); break;
             default: GGML_ABORT("unsupported quantized OUT_PROD type");
         }

@@ -412,6 +412,8 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q2_1:
         case GGML_TYPE_Q2_0S:
         case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_SNC4:
+        case GGML_TYPE_SNC8:
             return true;
         default:
             return false;
@@ -420,13 +422,15 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
 
 static int ggml_cuda_fattn_quant_bits(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_Q8_0:                 return 8;
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_SNC8:                 return 8;
         case GGML_TYPE_Q6_1:
         case GGML_TYPE_Q6_0:                 return 6;
         case GGML_TYPE_Q5_1:
         case GGML_TYPE_Q5_0:                 return 5;
         case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q4_0:                 return 4;
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_SNC4:                 return 4;
         case GGML_TYPE_Q3_1:
         case GGML_TYPE_Q3_0:                 return 3;
         case GGML_TYPE_Q2_1:
@@ -442,6 +446,8 @@ static int ggml_cuda_fattn_quant_variant(ggml_type type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q3_0:
         case GGML_TYPE_Q2_0S: return 1;
+        case GGML_TYPE_SNC4:
+        case GGML_TYPE_SNC8:  return 2;
         default:               return 0;
     }
 }
@@ -477,6 +483,12 @@ static bool ggml_cuda_fattn_pair_compiled(ggml_type type_K, ggml_type type_V) {
         return false;
     }
 
+    if (type_K == GGML_TYPE_SNC4 || type_K == GGML_TYPE_SNC8 ||
+        type_V == GGML_TYPE_SNC4 || type_V == GGML_TYPE_SNC8) {
+        return (type_K == GGML_TYPE_SNC4 || type_K == GGML_TYPE_SNC8 || type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16) &&
+               (type_V == GGML_TYPE_SNC4 || type_V == GGML_TYPE_SNC8 || type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16);
+    }
+
 #if defined(GGML_CUDA_FA_ALL_QUANTS)
     return true;
 #else
@@ -507,6 +519,29 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
     ggml_tensor * V = dst->src[2];
+
+    const int D_val = Q->ne[0];
+    const ggml_type type_K_val = ggml_cuda_fattn_canonical_kv_type(K->type);
+    const ggml_type type_V_val = ggml_cuda_fattn_canonical_kv_type(V->type);
+
+#define FATTN_VEC_CASE(D, type_K, type_V)                           \
+    if (D == D_val && type_K == type_K_val && type_V == type_V_val) { \
+        ggml_cuda_flash_attn_ext_vec_case<D, type_K, type_V>(ctx, dst); \
+        return;                                                     \
+    }
+
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC4, GGML_TYPE_SNC4)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC8, GGML_TYPE_SNC8)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC4, GGML_TYPE_SNC8)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC8, GGML_TYPE_SNC4)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC4, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC8, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_SNC4)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_SNC8)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC4, GGML_TYPE_BF16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_SNC8, GGML_TYPE_BF16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_SNC4)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_SNC8)
 
 #include "fattn-vec-dispatch.cuh"
 

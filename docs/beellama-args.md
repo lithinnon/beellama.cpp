@@ -22,9 +22,9 @@ body-plus-tail route and require a CUDA 12.4 build or release package. CUDA
 
 | Argument | Env var | Default | Behavior |
 |---|---|---|---|
-| `-ctk TYPE`, `--cache-type-k TYPE` | `LLAMA_ARG_CACHE_TYPE_K` | `f16` | Selects the target K cache. Bee adds the six KVarN values and standard `q6_0`, `q6_1`, `q3_0`, `q3_1`, `q2_0`, and `q2_1`. If only K or V is KVarN, the other side is promoted to the same KVarN width with a warning. |
+| `-ctk TYPE`, `--cache-type-k TYPE` | `LLAMA_ARG_CACHE_TYPE_K` | `f16` | Selects the target K cache. Bee adds the six KVarN values, standard `q6_0`, `q6_1`, `q3_0`, `q3_1`, `q2_0`, `q2_1`, and Streaming Norm-Calibrated `snc4` (4.500 bpe) and `snc8` (8.500 bpe). If only K or V is KVarN, the other side is promoted to the same KVarN width with a warning. |
 | `-ctv TYPE`, `--cache-type-v TYPE` | `LLAMA_ARG_CACHE_TYPE_V` | `f16` | Selects the target V cache with the same values and one-sided promotion rule as `--cache-type-k`. |
-| `-ctkd TYPE`, `--spec-draft-type-k TYPE` | `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` | `f16` | Selects the draft K cache. Bee accepts the six KVarN values for draft-simple, EAGLE3, audited owned Qwen MTP, DFlash1/DFlash2, and non-MLA DSpark contexts. A one-sided KVarN selection promotes draft V to the same width with a warning. |
+| `-ctkd TYPE`, `--spec-draft-type-k TYPE` | `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` | `f16` | Selects the draft K cache. Bee accepts the six KVarN values, `snc4`, and `snc8` for draft-simple, EAGLE3, audited owned Qwen MTP, DFlash1/DFlash2, and non-MLA DSpark contexts. A one-sided KVarN selection promotes draft V to the same width with a warning. |
 | `-ctvd TYPE`, `--spec-draft-type-v TYPE` | `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V` | `f16` | Selects the draft V cache with the same values and one-sided promotion rule. Target and draft cache selections remain independent. |
 | `--kvarn-window-chunk N` | `LLAMA_ARG_KVARN_WINDOW_CHUNK` | `GGML_KVARN_WINDOW_CHUNK` or `65536` | Sets the target context's CUDA KVarN prefill materialization window. |
 | `--spec-draft-kvarn-window-chunk N` | `LLAMA_ARG_SPEC_DRAFT_KVARN_WINDOW_CHUNK` | `2048` | Sets an owned draft context's CUDA KVarN prefill materialization window independently. |

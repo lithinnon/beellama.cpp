@@ -401,6 +401,78 @@ static __device__ void quantize_f32_iq4_nl_block(const float * __restrict__ x, b
     y->d = sumq2 > 0 ? sumqx/sumq2 : d;
 }
 
+static __device__ void quantize_f32_snc4_block(const float * __restrict__ x, block_snc4 * __restrict__ y) {
+    float amax = 0.0f;
+    float vmax = 0.0f;
+    float sum_sq_true = 0.0f;
+
+    for (int j = 0; j < QK_SNC4; ++j) {
+        const float v = x[j];
+        sum_sq_true += v * v;
+        if (amax < fabsf(v)) {
+            amax = fabsf(v);
+            vmax = v;
+        }
+    }
+
+    const float d = vmax / -8.0f;
+    const float id = d ? 1.0f / d : 0.0f;
+
+    float sum_sq_uncal = 0.0f;
+
+    for (int j = 0; j < QK_SNC4 / 2; ++j) {
+        const float x0 = x[0              + j] * id;
+        const float x1 = x[QK_SNC4 / 2    + j] * id;
+
+        const uint8_t xi0 = min(15, (int8_t)(x0 + 8.5f));
+        const uint8_t xi1 = min(15, (int8_t)(x1 + 8.5f));
+
+        y->qs[j]  = xi0;
+        y->qs[j] |= xi1 << 4;
+
+        const int8_t q0 = (int8_t)xi0 - 8;
+        const int8_t q1 = (int8_t)xi1 - 8;
+
+        const float u0 = (float)q0 * d;
+        const float u1 = (float)q1 * d;
+        sum_sq_uncal += u0 * u0 + u1 * u1;
+    }
+
+    const float n_true = sqrtf(sum_sq_true + 1e-10f);
+    const float n_uncal = sqrtf(sum_sq_uncal + 1e-10f);
+    const float gamma = n_true / n_uncal;
+    y->d = d * gamma;
+}
+
+static __device__ void quantize_f32_snc8_block(const float * __restrict__ x, block_snc8 * __restrict__ y) {
+    float amax = 0.0f;
+    float sum_sq_true = 0.0f;
+
+    for (int j = 0; j < QK_SNC8; ++j) {
+        const float v = x[j];
+        sum_sq_true += v * v;
+        amax = fmaxf(amax, fabsf(v));
+    }
+
+    const float d = amax / 127.0f;
+    const float id = d ? 1.0f / d : 0.0f;
+
+    float sum_sq_uncal = 0.0f;
+
+    for (int j = 0; j < QK_SNC8; ++j) {
+        const float x0 = x[j] * id;
+        const int8_t q0 = (int8_t)max(-128, min(127, (int)roundf(x0)));
+        y->qs[j] = q0;
+        const float u0 = (float)q0 * d;
+        sum_sq_uncal += u0 * u0;
+    }
+
+    const float n_true = sqrtf(sum_sq_true + 1e-10f);
+    const float n_uncal = sqrtf(sum_sq_uncal + 1e-10f);
+    const float gamma = n_true / n_uncal;
+    y->d = d * gamma;
+}
+
 // Wrapper functions for cpy.cu compatibility
 static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);
@@ -448,6 +520,14 @@ static __device__ void cpy_blck_f32_q8_0(const char * cxi, char * cdsti) {
 
 static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
     quantize_f32_iq4_nl_block((const float *)cxi, (block_iq4_nl *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_snc4(const char * cxi, char * cdsti) {
+    quantize_f32_snc4_block((const float *)cxi, (block_snc4 *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_snc8(const char * cxi, char * cdsti) {
+    quantize_f32_snc8_block((const float *)cxi, (block_snc8 *)cdsti);
 }
 
 template<typename src_t, typename dst_t>

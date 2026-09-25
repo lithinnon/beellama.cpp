@@ -438,7 +438,10 @@ extern "C" {
         GGML_TYPE_Q3_1    = 46,
         GGML_TYPE_Q2_0S   = 47,
         GGML_TYPE_Q2_1    = 48,
-        GGML_TYPE_COUNT   = 49,
+        // Streaming Norm-Calibrated (SNC) KV formats
+        GGML_TYPE_SNC4    = 49,
+        GGML_TYPE_SNC8    = 50,
+        GGML_TYPE_COUNT   = 51,
     };
 
     // precision

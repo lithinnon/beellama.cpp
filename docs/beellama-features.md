@@ -299,6 +299,51 @@ The user-facing `q2_0` cache name must not be treated as upstream's Q2_0 weight
 format. A requested CUDA FlashAttention pair must be compiled by the selected
 build tier.
 
+## Streaming Norm-Calibrated (SNC) KV caches
+
+### What they are
+
+Streaming Norm-Calibrated (SNC) quantization introduces `snc4` (4.500 bpe, 4-bit,
+QK=32) and `snc8` (8.500 bpe, 8-bit, QK=32) for high-fidelity KV cache compression.
+Unlike traditional uniform quantizers (`q4_0`, `q8_0`) which suffer from systematic
+norm contraction and negative dot-product expectation error under inner products, SNC
+calibrates block scales during streaming token quantization:
+
+```
+gamma = ||x||_2 / ||x_hat_0||_2 = sqrt( sum(x_i^2) / sum(x_hat_0_i^2) )
+d* = d_0 * gamma
+```
+
+The calibration ratio `gamma` is folded directly into the stored 16-bit half scale `d*`,
+preserving exact block L2 norms and achieving near-zero dot product expectation error
+(E_M approx 0) without any auxiliary scale or norm metadata overhead:
+- `snc4`: 18 bytes per 32 elements (16 bytes 4-bit packed nibbles + 2 bytes fp16 calibrated scale).
+- `snc8`: 34 bytes per 32 elements (32 bytes 8-bit signed quants + 2 bytes fp16 calibrated scale).
+
+Because E_M approx 0, attention dot products (`Q * K^T`) remain unbiased at long contexts,
+preventing entropy collapse and attention drift over extended agentic generation turns.
+
+### When to use them
+
+Use SNC when context length exceeds 32k tokens (e.g. 64k, 128k, 256k) where standard `q4_0`
+or `q8_0` accumulate dot-product drift, or when KVarN's structured 128-token tile
+representation cannot be used.
+- `snc4 K + snc4 V`: Balanced 4-bit KV cache with 50% memory reduction relative to standard 8-bit caches and over 70% reduction relative to F16.
+- `snc4 K + snc8 V`: Recommended asymmetric pairing for ultra-high-fidelity generation. Unbiased norm-calibrated K preserves attention weights, while 8.5 bpe V eliminates value-projection noise in the output residual stream.
+
+### Key arguments
+
+- [`--cache-type-k`](beellama-args.md#kvarn-cache-types-and-swa-overrides) (`snc4`, `snc8`)
+- [`--cache-type-v`](beellama-args.md#kvarn-cache-types-and-swa-overrides) (`snc4`, `snc8`)
+- `--spec-draft-type-k` and `--spec-draft-type-v` (supported for owned draft contexts)
+
+### Backend support
+
+- **CPU**: Optimized SIMD vector kernels for AVX2, AVX-512, and ARM NEON for streaming quantize and dequantize.
+- **CUDA / ROCm (HIP)**: Native vector FlashAttention (`fattn-vec`) covering all homogeneous and mixed pairs (`snc4:snc4`, `snc8:snc8`, `snc4:snc8`, `snc8:snc4`, `snc4:f16`, `snc8:f16`, `f16:snc4`, `f16:snc8`, `snc4:bf16`, `snc8:bf16`, `bf16:snc4`, `bf16:snc8`), prefill tile FlashAttention (`launch_fattn<128, 16, 1>`), `SET_ROWS`, and `GET_ROWS`.
+- **Vulkan**: Native compute shaders for vector and tile FlashAttention (`flash_attn_cm2.comp`), dequantization routines (`flash_attn_dequant.glsl`, `dequant_funcs_cm2.glsl`), and memory quantization (`copy_to_quant.comp`).
+- **Radix Caching & SWA**: Fully compatible with hierarchical multi-tier Radix caching (RXC), turn-based disk checkpoints, and sliding-window attention (SWA) compact suffix removal.
+
 ## KV cache precision tails for quantized caches
 
 ### What it is
