@@ -4024,7 +4024,7 @@ private:
                                 // MTP's pending target hidden row belongs to the previous
                                 // position, not to the live KV suffix. A native suffix rollback
                                 // cannot rewind it; restore target, draft and MTP state together.
-                                const bool state_required = uses_mtp() || (!extends_complete_prompt && !use_live_plan);
+                                const bool state_required = !extends_complete_prompt && (uses_mtp() || !use_live_plan);
                                 if (server_prompt_reuse_requires_checkpoint_search(
                                             state_required, pos_min, pos_min_thold)) {
                                     // Prefer the memory implementation's native suffix plan before
